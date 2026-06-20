@@ -1,0 +1,24 @@
+{
+  "name": "KasirPintarAI - AI Voice POS System",
+  "short_name": "KasirPintarAI",
+  "description": "Next-generation Point of Sale (POS) powered by Gemini AI Voice Assistant.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#09090b",
+  "theme_color": "#10b981",
+  "orientation": "portrait",
+  "icons": [
+    {
+      "src": "/icon-192x192.png",
+      "sizes": "192x192",
+      "type": "image/png",
+      "purpose": "any maskable"
+    },
+    {
+      "src": "/icon-512x512.png",
+      "sizes": "512x512",
+      "type": "image/png",
+      "purpose": "any maskable"
+    }
+  ]
+}

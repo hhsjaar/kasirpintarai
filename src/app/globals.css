@@ -1,0 +1,139 @@
+@import "tailwindcss";
+
+@theme {
+  --color-brand-green: #10b981;
+  --color-brand-green-glow: rgba(16, 185, 129, 0.06);
+  --color-light-bg: #f8fafc;
+  --color-light-surface: #ffffff;
+  --color-light-border: #e2e8f0;
+}
+
+:root {
+  --background: #f8fafc;
+  --foreground: #0f172a;
+  --primary: #10b981;
+}
+
+body {
+  background: var(--background);
+  color: var(--foreground);
+  overflow-x: hidden;
+  font-family: var(--font-sans), system-ui, -apple-system, sans-serif;
+}
+
+/* Premium Light-Mode Glassmorphism Panels */
+.glass-panel {
+  background: rgba(255, 255, 255, 0.75);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(255, 255, 255, 0.6);
+  box-shadow: 
+    0 10px 25px -5px rgba(15, 23, 42, 0.03), 
+    0 8px 16px -6px rgba(15, 23, 42, 0.02),
+    inset 0 1px 0 rgba(255, 255, 255, 0.8);
+}
+
+.glass-card {
+  background: rgba(255, 255, 255, 0.85);
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.5);
+  box-shadow: 
+    0 4px 12px -2px rgba(15, 23, 42, 0.02),
+    inset 0 1px 0 rgba(255, 255, 255, 0.9);
+}
+
+/* Premium Light-Mode Voice Orb Animations */
+@keyframes orb-pulse-light {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 
+      0 10px 30px -5px rgba(16, 185, 129, 0.25), 
+      0 0 20px 2px rgba(16, 185, 129, 0.15);
+  }
+  50% {
+    transform: scale(1.04);
+    box-shadow: 
+      0 20px 40px -5px rgba(16, 185, 129, 0.35), 
+      0 0 30px 6px rgba(16, 185, 129, 0.25);
+  }
+}
+
+@keyframes orb-listening-light {
+  0% {
+    transform: scale(0.96);
+    box-shadow: 
+      0 0 0 0 rgba(16, 185, 129, 0.4), 
+      0 0 0 10px rgba(16, 185, 129, 0.2),
+      0 0 0 20px rgba(16, 185, 129, 0.1);
+  }
+  100% {
+    transform: scale(1.06);
+    box-shadow: 
+      0 0 0 15px rgba(16, 185, 129, 0), 
+      0 0 0 30px rgba(16, 185, 129, 0),
+      0 0 0 45px rgba(16, 185, 129, 0);
+  }
+}
+
+@keyframes orb-thinking-light {
+  0% {
+    transform: rotate(0deg) scale(1.02);
+    box-shadow: 0 15px 35px -5px rgba(59, 130, 246, 0.25), 0 0 25px 4px rgba(59, 130, 246, 0.15);
+  }
+  50% {
+    transform: rotate(180deg) scale(0.98);
+    box-shadow: 0 15px 35px -5px rgba(139, 92, 246, 0.25), 0 0 30px 6px rgba(139, 92, 246, 0.15);
+  }
+  100% {
+    transform: rotate(360deg) scale(1.02);
+    box-shadow: 0 15px 35px -5px rgba(59, 130, 246, 0.25), 0 0 25px 4px rgba(59, 130, 246, 0.15);
+  }
+}
+
+@keyframes orb-speaking-light {
+  0%, 100% {
+    transform: scale(1);
+    box-shadow: 0 10px 30px -5px rgba(16, 185, 129, 0.25), 0 0 20px 2px rgba(16, 185, 129, 0.15);
+  }
+  25% {
+    transform: scale(1.08);
+    box-shadow: 0 15px 35px -5px rgba(16, 185, 129, 0.35), 0 0 30px 6px rgba(16, 185, 129, 0.25);
+  }
+  75% {
+    transform: scale(0.97);
+    box-shadow: 0 10px 25px -5px rgba(16, 185, 129, 0.2), 0 0 15px 2px rgba(16, 185, 129, 0.1);
+  }
+}
+
+.animate-orb-idle {
+  animation: orb-pulse-light 3s infinite ease-in-out;
+}
+
+.animate-orb-listening {
+  animation: orb-listening-light 1.5s infinite cubic-bezier(0.215, 0.61, 0.355, 1);
+}
+
+.animate-orb-thinking {
+  animation: orb-thinking-light 2s infinite linear;
+}
+
+.animate-orb-speaking {
+  animation: orb-speaking-light 1s infinite ease-in-out;
+}
+
+/* Custom Scrollbar for Light Mode */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 9999px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
