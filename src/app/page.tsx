@@ -39,6 +39,19 @@ export default function Home() {
   const [dashboardRefreshTrigger, setDashboardRefreshTrigger] = useState<number>(0);
   const [mockCheckout, setMockCheckout] = useState<{ invoiceNumber: string; totalAmount: number; token: string } | null>(null);
   
+  // Checkout Modal State
+  const [showCheckoutModal, setShowCheckoutModal] = useState<boolean>(false);
+  const [manualPaymentType, setManualPaymentType] = useState<'MIDTRANS' | 'KASBON'>('MIDTRANS');
+  const [manualBuyerName, setManualBuyerName] = useState<string>('');
+  const [checkoutLoading, setCheckoutLoading] = useState<boolean>(false);
+
+  // Ref to automatically scroll the chat container to bottom
+  const chatEndRef = React.useRef<HTMLDivElement>(null);
+
+  React.useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [chatLogs]);
+
   // Toast notifications
   const [toast, setToast] = useState<{ message: string; type: 'success' | 'alert' } | null>(null);
 
@@ -186,6 +199,14 @@ export default function Home() {
         break;
       }
 
+      case 'KASBON_CHECKOUT_SUCCESS': {
+        const { totalAmount, buyerName } = payload;
+        setCart([]);
+        triggerToast(`Kasbon dicatat: Rp ${totalAmount.toLocaleString('id-ID')} atas nama ${buyerName}`, 'success');
+        setDashboardRefreshTrigger((prev) => prev + 1);
+        break;
+      }
+
       case 'CONFIRM_MOCK_PAYMENT': {
         if (mockCheckout) {
           confirmMockPayment(mockCheckout.invoiceNumber);
@@ -228,26 +249,55 @@ export default function Home() {
   };
 
   // Manual checkout button click
-  const handleCheckoutBtnClick = async () => {
+  const handleCheckoutBtnClick = () => {
     if (cart.length === 0) return;
-    
+    setManualPaymentType('MIDTRANS');
+    setManualBuyerName('');
+    setShowCheckoutModal(true);
+  };
+
+  const handleManualCheckoutConfirm = async () => {
+    if (cart.length === 0) return;
+    if (manualPaymentType === 'KASBON' && !manualBuyerName.trim()) {
+      triggerToast('Nama pembeli wajib diisi untuk Kasbon', 'alert');
+      return;
+    }
+
+    setCheckoutLoading(true);
     try {
       const res = await fetch('/api/transactions/checkout', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          items: cart.map(c => ({ sku: c.sku, quantity: c.quantity }))
+          items: cart.map(c => ({ sku: c.sku, quantity: c.quantity })),
+          paymentType: manualPaymentType,
+          buyerName: manualBuyerName
         })
       });
       const data = await res.json();
       
-      if (data.success && data.token) {
-        handleMidtransPay(data.token);
+      if (data.success) {
+        setShowCheckoutModal(false);
+        if (manualPaymentType === 'KASBON') {
+          setCart([]);
+          setManualBuyerName('');
+          triggerToast(`Kasbon berhasil dicatat atas nama ${data.buyerName || manualBuyerName}`, 'success');
+          setDashboardRefreshTrigger((prev) => prev + 1);
+          handleTranscriptReceived("", `Transaksi Kasbon berhasil dicatat atas nama "${data.buyerName || manualBuyerName}" sebesar Rp ${data.totalAmount.toLocaleString('id-ID')}.`);
+          setVoiceCommandToSpeak({
+            text: `Kasbon berhasil dicatat atas nama ${data.buyerName || manualBuyerName} sebesar ${data.totalAmount} rupiah.`,
+            timestamp: Date.now()
+          });
+        } else {
+          handleMidtransPay(data.token);
+        }
       } else {
         triggerToast(data.error || 'Gagal memproses checkout.', 'alert');
       }
     } catch (err: any) {
       triggerToast(err.message, 'alert');
+    } finally {
+      setCheckoutLoading(false);
     }
   };
 
@@ -344,6 +394,7 @@ export default function Home() {
                   onTranscriptReceived={handleTranscriptReceived}
                   mockCheckoutActive={!!mockCheckout}
                   voiceCommandToSpeak={voiceCommandToSpeak}
+                  chatLogs={chatLogs}
                 />
               </div>
 
@@ -428,6 +479,7 @@ export default function Home() {
                       </div>
                     ))
                   )}
+                  <div ref={chatEndRef} />
                 </div>
               </div>
             </div>
@@ -533,6 +585,7 @@ export default function Home() {
                   onActionTriggered={handleActionTriggered}
                   onTranscriptReceived={handleTranscriptReceived}
                   compact={true}
+                  chatLogs={chatLogs}
                 />
               </div>
             </div>
@@ -544,6 +597,82 @@ export default function Home() {
           </div>
         )}
       </div>
+
+      {/* Manual Payment/Checkout Modal */}
+      {showCheckoutModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-fade-in">
+          <div className="w-full max-w-sm bg-white border border-slate-200 rounded-3xl p-6 shadow-2xl space-y-5 text-center">
+            <div>
+              <span className="text-xs bg-emerald-50 text-emerald-600 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
+                Pembayaran Toko
+              </span>
+              <h3 className="text-lg font-bold text-slate-800 mt-2">Pilih Metode Pembayaran</h3>
+              <p className="text-slate-500 text-xs mt-1">Total: <span className="font-extrabold text-emerald-650">Rp {cartTotal.toLocaleString('id-ID')}</span></p>
+            </div>
+
+            {/* Selection */}
+            <div className="grid grid-cols-2 gap-3.5">
+              <button
+                type="button"
+                onClick={() => setManualPaymentType('MIDTRANS')}
+                className={`p-4 rounded-2xl border text-center transition cursor-pointer flex flex-col items-center justify-center gap-2 ${
+                  manualPaymentType === 'MIDTRANS'
+                    ? 'border-emerald-500 bg-emerald-50/10 text-slate-850 shadow-sm'
+                    : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+                }`}
+              >
+                <CreditCard className="w-5.5 h-5.5 text-emerald-650" />
+                <span className="text-[11px] font-bold">QRIS / Midtrans</span>
+              </button>
+
+              <button
+                type="button"
+                onClick={() => setManualPaymentType('KASBON')}
+                className={`p-4 rounded-2xl border text-center transition cursor-pointer flex flex-col items-center justify-center gap-2 ${
+                  manualPaymentType === 'KASBON'
+                    ? 'border-emerald-500 bg-emerald-50/10 text-slate-850 shadow-sm'
+                    : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
+                }`}
+              >
+                <User className="w-5.5 h-5.5 text-emerald-600" />
+                <span className="text-[11px] font-bold">Kasbon Pembeli</span>
+              </button>
+            </div>
+
+            {/* Input name for Kasbon */}
+            {manualPaymentType === 'KASBON' && (
+              <div className="space-y-1 text-left animate-fade-in">
+                <label className="text-slate-500 text-3xs font-black uppercase tracking-wider block">Nama Pembeli</label>
+                <input
+                  type="text"
+                  placeholder="Masukkan nama pembeli..."
+                  className="w-full px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 font-bold focus:outline-none focus:ring-2 focus:ring-emerald-450 focus:border-transparent text-sm"
+                  value={manualBuyerName}
+                  onChange={(e) => setManualBuyerName(e.target.value)}
+                />
+              </div>
+            )}
+
+            <div className="space-y-2 pt-2">
+              <button
+                onClick={handleManualCheckoutConfirm}
+                disabled={checkoutLoading || (manualPaymentType === 'KASBON' && !manualBuyerName.trim())}
+                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition shadow-lg cursor-pointer text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {checkoutLoading ? 'Memproses...' : 'Konfirmasi Pembayaran'}
+              </button>
+              
+              <button
+                onClick={() => setShowCheckoutModal(false)}
+                disabled={checkoutLoading}
+                className="w-full py-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-500 font-bold rounded-xl transition text-xs cursor-pointer"
+              >
+                Batal
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Mock Payment Simulation Modal */}
       {mockCheckout && (

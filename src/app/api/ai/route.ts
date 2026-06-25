@@ -13,11 +13,15 @@ interface RequestBody {
   message: string;
   mode: 'customer' | 'owner';
   cartItems: CartItemInput[];
+  history?: Array<{
+    role: string;
+    parts: Array<{ text: string }>;
+  }>;
 }
 
 export async function POST(req: Request) {
   try {
-    const { message, mode, cartItems }: RequestBody = await req.json();
+    const { message, mode, cartItems, history }: RequestBody = await req.json();
 
     if (!message || message.trim() === '') {
       return NextResponse.json({ error: 'Message is required' }, { status: 400 });
@@ -28,10 +32,10 @@ export async function POST(req: Request) {
 
     if (isMock) {
       // Execute simulated (mock) AI logic using regex parsing for zero-config testing
-      return await handleMockAI(message, mode, cartItems);
+      return await handleMockAI(message, mode, cartItems, history);
     } else {
       // Execute real Gemini AI with Function Calling
-      return await handleRealGeminiAI(apiKey, message, mode, cartItems);
+      return await handleRealGeminiAI(apiKey, message, mode, cartItems, history);
     }
   } catch (error: any) {
     console.error('Error in AI Route:', error);
@@ -45,7 +49,12 @@ export async function POST(req: Request) {
 // ==========================================
 // 1. MOCK AI AGENT LOGIC (ZERO-CONFIG FALLBACK)
 // ==========================================
-async function handleMockAI(message: string, mode: 'customer' | 'owner', cartItems: CartItemInput[]) {
+async function handleMockAI(
+  message: string,
+  mode: 'customer' | 'owner',
+  cartItems: CartItemInput[],
+  history?: Array<{ role: string; parts: Array<{ text: string }> }>
+) {
   const query = message.toLowerCase();
   
   // CUSTOMER MODE SIMULATION
@@ -61,9 +70,22 @@ async function handleMockAI(message: string, mode: 'customer' | 'owner', cartIte
         });
       }
 
-      // Perform DB transaction creation
-      try {
-        const dbItems: any[] = [];
+      const isKasbon = query.includes('kasbon') || query.includes('hutang') || query.includes('nanti') || query.includes('catat');
+      const isQris = query.includes('qris') || query.includes('midtrans') || query.includes('sekarang') || query.includes('scan') || query.includes('transfer');
+
+      if (!isKasbon && !isQris) {
+        return NextResponse.json({
+          response: 'Baik, Kak! Belanjaannya mau dibayar langsung menggunakan QRIS atau dicatat sebagai Kasbon dulu nih? 😊',
+          speakText: 'Mau dibayar menggunakan QRIS atau dicatat sebagai Kasbon dulu, Kak?',
+          action: null,
+          isMock: true
+        });
+      }
+
+      if (!isKasbon) {
+        // Perform DB transaction creation for MIDTRANS/QRIS
+        try {
+          const dbItems: any[] = [];
         let totalAmount = 0;
 
         for (const item of cartItems) {
@@ -205,6 +227,202 @@ async function handleMockAI(message: string, mode: 'customer' | 'owner', cartIte
         return NextResponse.json({ response: 'Terjadi kesalahan checkout: ' + err.message, action: null, isMock: true });
       }
     }
+  }
+
+    // Check kasbon checkout (e.g. "kasbon atas nama Budi" or "checkout kasbon Budi")
+    const regexMockKasbon = /(?:kasbon|hutang|bayar nanti)\s+(?:atas nama|pake nama|untuk)?\s*([a-zA-Z\s]+)/i;
+    const matchMockKasbon = query.match(regexMockKasbon);
+    if (matchMockKasbon) {
+      const name = matchMockKasbon[1].trim();
+      if (name.toLowerCase() !== 'lunas' && name.toLowerCase() !== 'bayar' && name.toLowerCase() !== 'cek' && name.toLowerCase() !== 'daftar') {
+        if (!cartItems || cartItems.length === 0) {
+          return NextResponse.json({
+            response: 'Keranjang belanja Anda masih kosong. Silakan masukkan produk terlebih dahulu.',
+            speakText: 'Keranjang belanja Anda masih kosong.',
+            action: null,
+            isMock: true
+          });
+        }
+
+        try {
+          const dbItems: any[] = [];
+          let totalAmount = 0;
+
+          for (const item of cartItems) {
+            const product = await prisma.product.findUnique({
+              where: { sku: item.sku }
+            });
+            if (!product) {
+              return NextResponse.json({
+                response: `Produk dengan SKU ${item.sku} tidak ditemukan.`,
+                speakText: `Produk tidak ditemukan.`,
+                action: null,
+                isMock: true
+              });
+            }
+            if (product.stock < item.quantity) {
+              return NextResponse.json({
+                response: `Stok ${product.name} tidak mencukupi (Sisa: ${product.stock}, Diminta: ${item.quantity}).`,
+                speakText: `Stok tidak mencukupi.`,
+                action: null,
+                isMock: true
+              });
+            }
+            dbItems.push({ product, quantity: item.quantity });
+            totalAmount += product.price * item.quantity;
+          }
+
+          const invoiceNumber = 'INV-' + Date.now().toString().slice(-8);
+
+          // Create transaction and kasbon
+          await prisma.$transaction(async (tx) => {
+            await tx.transaction.create({
+              data: {
+                invoiceNumber,
+                totalAmount,
+                paymentStatus: 'PENDING',
+                paymentType: 'KASBON',
+                items: {
+                  create: dbItems.map((item) => ({
+                    productId: item.product.id,
+                    quantity: item.quantity,
+                    priceAtPurchase: item.product.price
+                  }))
+                },
+                kasbon: {
+                  create: {
+                    buyerName: name,
+                    amount: totalAmount,
+                    status: 'UNPAID'
+                  }
+                }
+              }
+            });
+
+            // Deduct stock and log stock logs
+            for (const item of dbItems) {
+              await tx.product.update({
+                where: { id: item.product.id },
+                data: { stock: { decrement: item.quantity } }
+              });
+
+              await tx.stockLog.create({
+                data: {
+                  productId: item.product.id,
+                  type: 'STOCK_OUT',
+                  quantity: item.quantity,
+                  reason: `Kasbon ${invoiceNumber} oleh ${name}`
+                }
+              });
+            }
+          });
+
+          return NextResponse.json({
+            response: `Transaksi Kasbon berhasil dicatat atas nama "${name}" dengan total Rp ${totalAmount.toLocaleString('id-ID')}. Keranjang belanja telah dikosongkan.`,
+            speakText: `Kasbon berhasil dicatat atas nama ${name} sebesar ${totalAmount} rupiah. Terima kasih!`,
+            action: {
+              type: 'KASBON_CHECKOUT_SUCCESS',
+              payload: {
+                invoiceNumber,
+                totalAmount,
+                buyerName: name
+              }
+            },
+            isMock: true
+          });
+        } catch (err: any) {
+          return NextResponse.json({ response: 'Terjadi kesalahan kasbon: ' + err.message, action: null, isMock: true });
+        }
+      }
+    }
+
+    // Check if user wants to checkout with Kasbon but no buyer name is provided in Mock AI
+    if (query.includes('kasbon') || query.includes('hutang') || query.includes('bayar nanti')) {
+      const isCheckOrPay = query.includes('cek') || query.includes('daftar') || query.includes('siapa') || query.includes('bayar') || query.includes('lunas');
+      if (!isCheckOrPay && !matchMockKasbon) {
+        return NextResponse.json({
+          response: 'Oke, Kak! Siap, bisa banget kok kasbon dulu. Tapi, sebelumnya boleh tahu nama lengkap Kakak siapa ya, biar bisa dicatat di pembukuan kasbon kita?',
+          speakText: 'Boleh tahu nama lengkap Kakak siapa ya?',
+          action: { type: 'ASK_KASBON_NAME', payload: null },
+          isMock: true
+        });
+      }
+    }
+
+    // Check query for kasbon list or details (e.g. "siapa saja yang kasbon" or "cek kasbon")
+    if (query.includes('cek kasbon') || query.includes('daftar kasbon') || query.includes('siapa yang kasbon') || query.includes('siapa saja yang kasbon')) {
+      try {
+        const kasbons = await prisma.kasbon.findMany({
+          where: { status: 'UNPAID' },
+          orderBy: { createdAt: 'desc' }
+        });
+        if (kasbons.length === 0) {
+          return NextResponse.json({
+            response: 'Hebat! Tidak ada catatan kasbon yang belum lunas saat ini.',
+            speakText: 'Tidak ada kasbon yang belum lunas.',
+            action: null,
+            isMock: true
+          });
+        }
+        const listStr = kasbons.map(k => `- ${k.buyerName}: Rp ${k.amount.toLocaleString('id-ID')}`).join('\n');
+        return NextResponse.json({
+          response: `Berikut adalah daftar kasbon belum lunas:\n${listStr}`,
+          speakText: `Ada ${kasbons.length} orang yang memiliki kasbon belum lunas.`,
+          action: null,
+          isMock: true
+        });
+      } catch (err: any) {
+        return NextResponse.json({ response: 'Gagal mengambil data kasbon: ' + err.message, isMock: true });
+      }
+    }
+
+    // Check settle kasbon via voice command (e.g. "bayar kasbon Budi" or "lunas kasbon Budi")
+    const regexPayKasbon = /(?:bayar kasbon|lunas kasbon|lunasi kasbon|bayar hutang)\s+([a-zA-Z\s]+)/i;
+    const matchPayKasbon = query.match(regexPayKasbon);
+    if (matchPayKasbon) {
+      const name = matchPayKasbon[1].trim();
+      try {
+        const unpaidKasbons = await prisma.kasbon.findMany({
+          where: {
+            buyerName: { equals: name, mode: 'insensitive' },
+            status: 'UNPAID'
+          }
+        });
+        if (unpaidKasbons.length === 0) {
+          return NextResponse.json({
+            response: `Tidak ditemukan catatan kasbon yang belum lunas atas nama "${name}".`,
+            speakText: `Kasbon atas nama ${name} tidak ditemukan.`,
+            action: null,
+            isMock: true
+          });
+        }
+
+        await prisma.$transaction(async (tx) => {
+          for (const k of unpaidKasbons) {
+            await tx.kasbon.update({
+              where: { id: k.id },
+              data: { status: 'PAID' }
+            });
+            if (k.transactionId) {
+              await tx.transaction.update({
+                where: { id: k.transactionId },
+                data: { paymentStatus: 'PAID' }
+              });
+            }
+          }
+        });
+
+        const totalPaid = unpaidKasbons.reduce((sum, k) => sum + k.amount, 0);
+        return NextResponse.json({
+          response: `Berhasil melunasi kasbon atas nama "${name}" sebesar Rp ${totalPaid.toLocaleString('id-ID')}.`,
+          speakText: `Kasbon atas nama ${name} sebesar ${totalPaid} rupiah berhasil dilunasi.`,
+          action: { type: 'UPDATE_DATABASE', payload: null },
+          isMock: true
+        });
+      } catch (err: any) {
+        return NextResponse.json({ response: 'Terjadi kesalahan pelunasan kasbon: ' + err.message, action: null, isMock: true });
+      }
+    }
 
     // Check clear cart
     if (query.includes('kosongkan') || query.includes('bersihkan keranjang')) {
@@ -247,9 +465,24 @@ async function handleMockAI(message: string, mode: 'customer' | 'owner', cartIte
       }
       
       // Extract clean product keyword
-      const productKeyword = cleanedQuery
+      let productKeyword = cleanedQuery
         .replace(/(?:beli|pesan|tambah|order|ambil)/gi, '')
         .trim();
+      
+      // Resolve contextual reference from history if keyword is missing/generic
+      const genericKeywords = ['itu', 'ke keranjang', 'keranjang', 'oke', 'masukkan', 'tambahkan', 'dong', 'ke', 'ini'];
+      if ((!productKeyword || productKeyword.length < 3 || genericKeywords.includes(productKeyword)) && history && history.length > 0) {
+        const allProds = await prisma.product.findMany({});
+        // Scan history from most recent to oldest
+        for (let i = history.length - 1; i >= 0; i--) {
+          const histText = history[i].parts?.[0]?.text?.toLowerCase() || '';
+          const found = allProds.find(p => histText.includes(p.name.toLowerCase()) || histText.includes(p.sku.toLowerCase()));
+          if (found) {
+            productKeyword = found.name.toLowerCase();
+            break;
+          }
+        }
+      }
         
       if (productKeyword && productKeyword.length >= 2) {
         // Search db
@@ -520,116 +753,173 @@ async function handleRealGeminiAI(
   apiKey: string,
   message: string,
   mode: 'customer' | 'owner',
-  cartItems: CartItemInput[]
+  cartItems: CartItemInput[],
+  history?: any[]
 ) {
   const genAI = new GoogleGenerativeAI(apiKey);
   // Using gemini-2.5-flash for speed and lower latency
   const model = genAI.getGenerativeModel({
     model: 'gemini-2.5-flash',
-    systemInstruction: `Anda adalah KasirPintarAI, asisten POS suara pintar untuk toko retail. 
-    Anda berjalan dalam dua mode: Customer Mode (membantu belanja, cek harga, tambah ke keranjang, checkout) dan Owner Mode (mengelola harga, stok, dan melihat omzet/laporan).
+    systemInstruction: `Anda adalah KasirPintarAI, asisten POS suara pintar untuk toko retail di Indonesia. 
+    Anda berjalan dalam dua mode: Customer Mode (membantu belanja, cek harga, tambah ke keranjang, checkout) dan Owner Mode (mengelola harga, stok, melihat omzet/laporan, dan mengelola kasbon/hutang pembeli).
     
     Saat ini Anda berjalan di mode: ${mode.toUpperCase()}.
     
+    PENTING: Gunakan bahasa Indonesia sehari-hari yang sangat luwes, hangat, asyik, dan bersahabat layaknya seorang penjaga kasir retail yang ramah dan interaktif (Gunakan panggilan santun seperti "Kak" kepada customer, serta partikel percakapan yang alami seperti "ya", "nih", "oke"). Hindari bahasa yang terlalu formal, kaku, atau monoton.
+    
+    ATURAN BACA SUARA:
+    - Jangan pernah menyebutkan nomor invoice (seperti "INV-12345") atau ID transaksi dalam balasan suara/teks. Cukup sampaikan konfirmasi sukses atau total belanjanya saja secara ramah.
+    - PENTING: Tulis singkatan "AI" tetap sebagai "AI" di teks balasan chat window (JANGAN ditulis sebagai "e ai" atau "e-ai"). Mesin suara client secara otomatis akan melafalkannya sebagai "e-ai" secara dinamis.
+    
+    DILARANG menggunakan kosakata bahasa Melayu Malaysia seperti "sila" (gunakan "silakan"), "kedai" (gunakan "toko"), "senarai" (gunakan "daftar"), "pemilik" (gunakan "owner"), atau kosakata Melayu lainnya yang tidak lazim di Indonesia.
+    
     ATURAN CUSTOMER MODE:
-    - Panggil 'getCartAction' dengan aksi 'ADD' jika pelanggan menyatakan ingin membeli, memesan, menambahkan barang ke keranjang (misal: "beli indomie", "tambah aqua", "saya mau indomie", "order indomie"). Jika jumlah barang tidak disebutkan, gunakan quantity: 1.
-    - PENTING: JANGAN HANYA menjawab dengan teks atau memanggil 'searchProducts' ketika pelanggan berniat membeli (misal: "beli mie goreng 1"). Anda HARUS langsung memanggil 'getCartAction' dengan aksi 'ADD' dan menyertakan nama/SKU barang tersebut di parameter 'skuOrName' agar sistem langsung memasukkannya ke keranjang belanja asli.
+    - PENTING: Ketika pelanggan menyatakan ingin membeli, memesan, atau menambahkan barang ke keranjang (misalnya: "beli indomie", "tambah aqua", "ambil chitato", "tambah teh botol", "saya mau kopi"), Anda HARUS langsung memanggil 'getCartAction' dengan aksi 'ADD' dan mengirimkan kata kunci barang tersebut (misal: "indomie", "aqua", "chitato", "teh botol") ke parameter 'skuOrName'. JANGAN memanggil 'searchProducts' terlebih dahulu karena backend kami memiliki pencocokan nama otomatis yang sangat cerdas di database.
+    - PENTING: JANGAN PERNAH hanya menjawab atau menawarkan produk di teks chat tanpa memanggil 'getCartAction' jika pelanggan berniat membeli atau memasukkannya ke keranjang. Panggil 'searchProducts' HANYA jika mereka sekadar bertanya ketersediaan/harga produk tanpa ada indikasi membeli.
+    - KELOLA KONTEKS: Jika pelanggan memerintahkan tindakan secara implisit atau merujuk ke produk dari riwayat percakapan sebelumnya (misalnya, mereka bertanya "berapa harga aqua botol?" lalu berkata "oke tambahkan ke keranjang" atau "beli itu"), Anda HARUS melacak nama produk terakhir yang dibahas dari percakapan sebelumnya (misalnya: "aqua botol") dan mengirimkannya sebagai parameter 'skuOrName' ke 'getCartAction' dengan aksi 'ADD'. Jangan bertanya ulang produk apa yang ingin dibeli jika produk tersebut jelas dari konteks percakapan di atas.
     - Panggil 'getCartAction' dengan aksi 'REMOVE' jika pelanggan ingin menghapus produk dari keranjang.
     - Panggil 'getCartAction' dengan aksi 'CLEAR' jika pelanggan ingin mengosongkan keranjang.
     - Hanya panggil 'searchProducts' jika pelanggan sekadar bertanya tentang keberadaan produk, mencari barang, atau bertanya harga produk tanpa berniat membelinya secara langsung (misal: "apakah ada indomie?", "berapa harga aqua?", "cari produk susu").
-    - Panggil 'checkoutCart' untuk memproses checkout ketika pelanggan menyatakan ingin membayar, checkout, atau selesai belanja.
+    
+    ATURAN CHECKOUT / BAYAR:
+    - PENTING: Ketika pelanggan menyatakan ingin membayar, checkout, atau sudah selesai belanja (misal: "checkout dong", "saya mau bayar", "sudah selesai belanja"), Anda JANGAN langsung memanggil 'checkoutCart' kecuali mereka menyebutkan metode pembayaran secara spesifik (seperti QRIS atau Kasbon). Tanyakan terlebih dahulu kepada pelanggan: *"Mau dibayar langsung menggunakan QRIS atau dicatat sebagai Kasbon dulu nih, Kak? 😊"*.
+    - Jika pelanggan memilih QRIS/bayar langsung, panggil 'checkoutCart' dengan paymentType: 'MIDTRANS'.
+    - Jika pelanggan memilih Kasbon/hutang/bayar nanti, panggil 'checkoutCart' dengan paymentType: 'KASBON'. (Ingat: jika nama pembeli belum disebutkan, kirim buyerName sebagai string kosong agar sistem memproses penanyaan nama).
     - Selalu tampilkan detail harga produk yang ramah dalam Rupiah.
     
     ATURAN OWNER MODE:
-    - Bantu pemilik toko mengubah harga, restock, melihat laporan omzet, dan mencari produk stok menipis.
+    - Bantu pemilik toko mengubah harga, restock, melihat laporan omzet, mencari produk stok menipis, serta mengelola kasbon pembeli.
     - Panggil 'updateProductPrice' untuk mengubah harga produk.
     - Panggil 'adjustProductStock' untuk menambah atau mengurangi stok barang.
     - Panggil 'getStoreAnalytics' untuk memperoleh metrik keuangan, produk terlaris, atau produk stok menipis.
+    - Panggil 'checkKasbon' untuk melihat siapa saja yang berutang/kasbon.
+    - Panggil 'payKasbon' untuk melunasi kasbon pembeli atas nama tertentu.
  
     INFORMASI PENTING:
-    - Selalu gunakan bahasa Indonesia yang sopan, natural, dan ringkas layaknya percakapan suara yang tidak bertele-tele.
-    - Berikan instruksi atau konfirmasi yang jelas kepada pengguna.
+    - Selalu berikan instruksi atau konfirmasi yang jelas kepada pengguna.
     - Jika pengguna meminta tindakan yang membutuhkan alat (tools), panggil fungsi yang sesuai.`
   });
 
-  // Tools definition
-  const tools: any = [
+  // Tools definition partitioned by mode to prevent cross-calling
+  const customerDeclarations = [
     {
-      functionDeclarations: [
-        {
-          name: 'searchProducts',
-          description: 'Mencari produk di dalam inventori toko berdasarkan kata kunci nama produk atau SKU. Gunakan kata kunci kosong "" atau "semua" untuk menampilkan seluruh daftar daftar barang yang tersedia.',
-          parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-              query: { type: SchemaType.STRING, description: 'Kata kunci nama produk (misalnya: Indomie, Aqua) atau SKU. Gunakan kata kunci "semua" atau kosong untuk mendaftar seluruh produk.' }
-            },
-            required: ['query']
-          }
+      name: 'searchProducts',
+      description: 'Mencari produk di dalam inventori toko berdasarkan kata kunci nama produk atau SKU. Gunakan kata kunci kosong "" atau "semua" untuk menampilkan seluruh daftar daftar barang yang tersedia.',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          query: { type: SchemaType.STRING, description: 'Kata kunci nama produk (misalnya: Indomie, Aqua) atau SKU. Gunakan kata kunci "semua" or kosong untuk mendaftar seluruh produk.' }
         },
-        {
-          name: 'getCartAction',
-          description: 'Mengelola isi keranjang belanja customer (ADD: menambah produk, REMOVE: menghapus produk, CLEAR: mengosongkan keranjang).',
-          parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-              action: { type: SchemaType.STRING, enum: ['ADD', 'REMOVE', 'CLEAR'], description: 'Jenis aksi keranjang.' },
-              skuOrName: { type: SchemaType.STRING, description: 'SKU produk atau nama produk yang ingin ditambah atau dihapus (misal: "IND-GOR" atau "mie goreng"). Wajib diisi untuk ADD/REMOVE.' },
-              quantity: { type: SchemaType.NUMBER, description: 'Jumlah unit produk (default: 1).' }
-            },
-            required: ['action']
-          }
+        required: ['query']
+      }
+    },
+    {
+      name: 'getCartAction',
+      description: 'Mengelola isi keranjang belanja customer (ADD: menambah produk, REMOVE: menghapus produk, CLEAR: mengosongkan keranjang).',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          action: { type: SchemaType.STRING, enum: ['ADD', 'REMOVE', 'CLEAR'], description: 'Jenis aksi keranjang.' },
+          skuOrName: { type: SchemaType.STRING, description: 'SKU produk atau nama produk yang ingin ditambah atau dihapus. Anda dapat mengirimkan kata kunci pendek/informal (seperti "aqua", "chitato", "teh botol"), karena sistem memiliki pencarian cerdas yang akan mencocokkannya ke database.' },
+          quantity: { type: SchemaType.NUMBER, description: 'Jumlah unit produk (default: 1).' }
         },
-        {
-          name: 'checkoutCart',
-          description: 'Melakukan pembayaran/checkout untuk seluruh isi keranjang belanja dan memicu pembayaran QRIS.',
-          parameters: {
-            type: SchemaType.OBJECT,
-            properties: {}
-          }
-        },
-        {
-          name: 'updateProductPrice',
-          description: 'Owner Tool: Mengubah harga jual produk berdasarkan SKU atau nama.',
-          parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-              skuOrName: { type: SchemaType.STRING, description: 'SKU produk atau nama produk.' },
-              price: { type: SchemaType.NUMBER, description: 'Harga baru dalam rupiah.' }
-            },
-            required: ['skuOrName', 'price']
-          }
-        },
-        {
-          name: 'adjustProductStock',
-          description: 'Owner Tool: Menambah atau mengurangi stok produk (delta positif untuk masuk, delta negatif untuk keluar) berdasarkan SKU atau nama.',
-          parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-              skuOrName: { type: SchemaType.STRING, description: 'SKU produk atau nama produk.' },
-              delta: { type: SchemaType.NUMBER, description: 'Besar penyesuaian stok. Gunakan angka positif untuk tambah stok, negatif untuk kurangi stok.' },
-              reason: { type: SchemaType.STRING, description: 'Alasan penyesuaian stok (opsional).' }
-            },
-            required: ['skuOrName', 'delta']
-          }
-        },
-        {
-          name: 'getStoreAnalytics',
-          description: 'Owner Tool: Mengambil analisis performa penjualan toko, produk terlaris, dan produk dengan stok menipis.',
-          parameters: {
-            type: SchemaType.OBJECT,
-            properties: {
-              period: { type: SchemaType.STRING, enum: ['day', 'week', 'month'], description: 'Periode waktu laporan.' }
-            },
-            required: ['period']
-          }
+        required: ['action']
+      }
+    },
+    {
+      name: 'checkoutCart',
+      description: 'Melakukan pembayaran/checkout untuk seluruh isi keranjang belanja. Bisa menggunakan QRIS/Midtrans biasa, atau menggunakan metode Kasbon (bayar nanti/hutang pembeli). Panggil fungsi ini jika pelanggan ingin kasbon (bayar nanti/hutang), meskipun namanya belum disebutkan (kirim buyerName sebagai string kosong atau undefined).',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          paymentType: { type: SchemaType.STRING, enum: ['MIDTRANS', 'KASBON'], description: 'Tipe pembayaran (MIDTRANS untuk bayar sekarang via QRIS, KASBON untuk hutang pembeli/bayar nanti).' },
+          buyerName: { type: SchemaType.STRING, description: 'Nama lengkap pembeli yang melakukan kasbon. Jika pembeli belum menyebutkan namanya, kirim string kosong "" agar sistem memicu alur penanyaan nama.' }
         }
-      ]
+      }
     }
   ];
 
-  // Start chat with tools
+  const ownerDeclarations = [
+    {
+      name: 'searchProducts',
+      description: 'Mencari produk di dalam inventori toko berdasarkan kata kunci nama produk atau SKU. Gunakan kata kunci kosong "" atau "semua" untuk menampilkan seluruh daftar daftar barang yang tersedia.',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          query: { type: SchemaType.STRING, description: 'Kata kunci nama produk (misalnya: Indomie, Aqua) atau SKU. Gunakan kata kunci "semua" or kosong untuk mendaftar seluruh produk.' }
+        },
+        required: ['query']
+      }
+    },
+    {
+      name: 'checkKasbon',
+      description: 'Owner Tool: Melihat daftar kasbon pembeli yang belum lunas di database. Bisa memfilter berdasarkan nama pembeli tertentu.',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          buyerName: { type: SchemaType.STRING, description: 'Nama pembeli untuk mencari kasbon spesifik (opsional).' }
+        }
+      }
+    },
+    {
+      name: 'payKasbon',
+      description: 'Owner Tool: Melunasi catatan kasbon pembeli berdasarkan nama pembeli yang berutang.',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          buyerName: { type: SchemaType.STRING, description: 'Nama lengkap pembeli yang ingin membayar/melunasi kasbonnya.' }
+        },
+        required: ['buyerName']
+      }
+    },
+    {
+      name: 'updateProductPrice',
+      description: 'Owner Tool: Mengubah harga jual produk berdasarkan SKU atau nama.',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          skuOrName: { type: SchemaType.STRING, description: 'SKU produk atau nama produk.' },
+          price: { type: SchemaType.NUMBER, description: 'Harga baru dalam rupiah.' }
+        },
+        required: ['skuOrName', 'price']
+      }
+    },
+    {
+      name: 'adjustProductStock',
+      description: 'Owner Tool: Menambah atau mengurangi stok produk (delta positif untuk masuk, delta negatif untuk keluar) berdasarkan SKU atau nama.',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          skuOrName: { type: SchemaType.STRING, description: 'SKU produk atau nama produk.' },
+          delta: { type: SchemaType.NUMBER, description: 'Besar penyesuaian stok. Gunakan angka positif untuk tambah stok, negatif untuk kurangi stok.' },
+          reason: { type: SchemaType.STRING, description: 'Alasan penyesuaian stok (opsional).' }
+        },
+        required: ['skuOrName', 'delta']
+      }
+    },
+    {
+      name: 'getStoreAnalytics',
+      description: 'Owner Tool: Mengambil analisis performa penjualan toko, produk terlaris, dan produk dengan stok menipis.',
+      parameters: {
+        type: SchemaType.OBJECT,
+        properties: {
+          period: { type: SchemaType.STRING, enum: ['day', 'week', 'month'], description: 'Periode waktu laporan.' }
+        },
+        required: ['period']
+      }
+    }
+  ];
+
+  const declarations = mode === 'customer' ? customerDeclarations : ownerDeclarations;
+  const tools: any = [
+    {
+      functionDeclarations: declarations
+    }
+  ];
+
+  // Start chat with tools and conversational history
   const chat = model.startChat({
+    history: history,
     tools: tools,
     generationConfig: {
       temperature: 0.2
@@ -768,97 +1058,218 @@ async function handleRealGeminiAI(
       if (!cartItems || cartItems.length === 0) {
         toolResult = { success: false, error: 'Keranjang masih kosong.' };
       } else {
-        try {
-          const dbItems: any[] = [];
-          let totalAmount = 0;
+        const paymentType = args.paymentType || 'MIDTRANS';
+        const buyerName = args.buyerName || '';
 
-          for (const item of cartItems) {
-            const product = await prisma.product.findUnique({ where: { sku: item.sku } });
-            if (!product) throw new Error(`Produk SKU ${item.sku} tidak ditemukan.`);
-            if (product.stock < item.quantity) throw new Error(`Stok ${product.name} kurang.`);
-            dbItems.push({ product, quantity: item.quantity });
-            totalAmount += product.price * item.quantity;
+        if (paymentType === 'KASBON' && (!buyerName || buyerName.trim() === '')) {
+          toolResult = { success: false, error: 'Nama pembeli wajib diisi untuk melakukan Kasbon.' };
+          clientAction = { type: 'ASK_KASBON_NAME', payload: null };
+        } else {
+          try {
+            const dbItems: any[] = [];
+            let totalAmount = 0;
+
+            for (const item of cartItems) {
+              const product = await prisma.product.findUnique({ where: { sku: item.sku } });
+              if (!product) throw new Error(`Produk SKU ${item.sku} tidak ditemukan.`);
+              if (product.stock < item.quantity) throw new Error(`Stok ${product.name} tidak cukup.`);
+              dbItems.push({ product, quantity: item.quantity });
+              totalAmount += product.price * item.quantity;
+            }
+
+            const invoiceNumber = 'INV-' + Date.now().toString().slice(-8);
+
+            if (paymentType === 'KASBON') {
+              // Direct creation of KASBON transaction and deduction of stock
+              const result = await prisma.$transaction(async (tx) => {
+                const txn = await tx.transaction.create({
+                  data: {
+                    invoiceNumber,
+                    totalAmount,
+                    paymentStatus: 'PENDING',
+                    paymentType: 'KASBON',
+                    items: {
+                      create: dbItems.map((item) => ({
+                        productId: item.product.id,
+                        quantity: item.quantity,
+                        priceAtPurchase: item.product.price
+                      }))
+                    },
+                    kasbon: {
+                      create: {
+                        buyerName: buyerName.trim(),
+                        amount: totalAmount,
+                        status: 'UNPAID'
+                      }
+                    }
+                  }
+                });
+
+                for (const item of dbItems) {
+                  const updated = await tx.product.update({
+                    where: { id: item.product.id },
+                    data: { stock: { decrement: item.quantity } }
+                  });
+
+                  if (updated.stock <= updated.minStock) {
+                    await tx.notification.create({
+                      data: {
+                        message: `${updated.name} stok menipis (Sisa ${updated.stock}, Batas: ${updated.minStock})`,
+                        type: 'LOW_STOCK'
+                      }
+                    });
+                  }
+                }
+                return txn;
+              });
+
+              toolResult = { success: true, invoiceNumber, totalAmount, paymentType: 'KASBON', buyerName: buyerName.trim() };
+              clientAction = {
+                type: 'KASBON_CHECKOUT_SUCCESS',
+                payload: {
+                  invoiceNumber,
+                  totalAmount,
+                  buyerName: buyerName.trim()
+                }
+              };
+            } else {
+              // Standard MIDTRANS flow
+              const txn = await prisma.transaction.create({
+                data: {
+                  invoiceNumber,
+                  totalAmount,
+                  paymentStatus: 'PENDING',
+                  paymentType: 'MIDTRANS',
+                  items: {
+                    create: dbItems.map((item) => ({
+                      productId: item.product.id,
+                      quantity: item.quantity,
+                      priceAtPurchase: item.product.price
+                    }))
+                  }
+                }
+              });
+
+              // Request Midtrans Token
+              let midtransToken = '';
+              const serverKey = process.env.MIDTRANS_SERVER_KEY;
+              if (serverKey) {
+                const authHeader = Buffer.from(serverKey + ':').toString('base64');
+                const midtransUrl = 'https://app.sandbox.midtrans.com/snap/v1/transactions';
+                const midtransRequestBody = {
+                  transaction_details: {
+                    order_id: invoiceNumber,
+                    gross_amount: totalAmount
+                  },
+                  item_details: dbItems.map(item => ({
+                    id: item.product.sku,
+                    price: item.product.price,
+                    quantity: item.quantity,
+                    name: item.product.name
+                  })),
+                  credit_card: {
+                    secure: true
+                  }
+                };
+                const response = await fetch(midtransUrl, {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Accept': 'application/json',
+                    'Authorization': `Basic ${authHeader}`
+                  },
+                  body: JSON.stringify(midtransRequestBody)
+                });
+                const midtransData = await response.json();
+                if (response.ok && midtransData.token) {
+                  midtransToken = midtransData.token;
+                  // Update transaction with the Midtrans Token
+                  await prisma.transaction.update({
+                    where: { id: txn.id },
+                    data: { midtransId: midtransToken }
+                  });
+                } else {
+                  console.error('Midtrans API Error during AI checkout:', midtransData);
+                  midtransToken = 'mock-' + invoiceNumber;
+                }
+              } else {
+                midtransToken = 'mock-' + invoiceNumber;
+              }
+
+              toolResult = { success: true, invoiceNumber, totalAmount, midtransToken };
+              clientAction = {
+                type: 'INITIATE_CHECKOUT',
+                payload: {
+                  token: midtransToken,
+                  transactionId: txn.id,
+                  invoiceNumber: txn.invoiceNumber,
+                  totalAmount,
+                  items: dbItems.map(i => ({ name: i.product.name, price: i.product.price, quantity: i.quantity }))
+                }
+              };
+            }
+          } catch (err: any) {
+            toolResult = { success: false, error: err.message };
           }
+        }
+      }
+    }
 
-          const invoiceNumber = 'INV-' + Date.now().toString().slice(-8);
+    else if (funcName === 'checkKasbon') {
+      const { buyerName } = args;
+      try {
+        const whereClause: any = { status: 'UNPAID' };
+        if (buyerName && buyerName.trim() !== '') {
+          whereClause.buyerName = { contains: buyerName.trim(), mode: 'insensitive' };
+        }
 
-          // Create transaction
-          const txn = await prisma.transaction.create({
-            data: {
-              invoiceNumber,
-              totalAmount,
-              paymentStatus: 'PENDING',
-              paymentType: 'MIDTRANS',
-              items: {
-                create: dbItems.map((item) => ({
-                  productId: item.product.id,
-                  quantity: item.quantity,
-                  priceAtPurchase: item.product.price
-                }))
+        const kasbons = await prisma.kasbon.findMany({
+          where: whereClause,
+          orderBy: { createdAt: 'desc' }
+        });
+
+        toolResult = { success: true, count: kasbons.length, list: kasbons.map(k => ({ buyerName: k.buyerName, amount: k.amount, date: k.createdAt })) };
+      } catch (err: any) {
+        toolResult = { success: false, error: err.message };
+      }
+    }
+
+    else if (funcName === 'payKasbon') {
+      const { buyerName } = args;
+      try {
+        const name = buyerName.trim();
+        const unpaidKasbons = await prisma.kasbon.findMany({
+          where: {
+            buyerName: { equals: name, mode: 'insensitive' },
+            status: 'UNPAID'
+          }
+        });
+
+        if (unpaidKasbons.length === 0) {
+          toolResult = { success: false, error: `Tidak ditemukan catatan kasbon yang belum lunas atas nama "${name}".` };
+        } else {
+          await prisma.$transaction(async (tx) => {
+            for (const k of unpaidKasbons) {
+              await tx.kasbon.update({
+                where: { id: k.id },
+                data: { status: 'PAID' }
+              });
+
+              if (k.transactionId) {
+                await tx.transaction.update({
+                  where: { id: k.transactionId },
+                  data: { paymentStatus: 'PAID' }
+                });
               }
             }
           });
 
-          // Request Midtrans Token
-          let midtransToken = '';
-          const serverKey = process.env.MIDTRANS_SERVER_KEY;
-          if (serverKey) {
-            const authHeader = Buffer.from(serverKey + ':').toString('base64');
-            const midtransUrl = 'https://app.sandbox.midtrans.com/snap/v1/transactions';
-            const midtransRequestBody = {
-              transaction_details: {
-                order_id: invoiceNumber,
-                gross_amount: totalAmount
-              },
-              item_details: dbItems.map(item => ({
-                id: item.product.sku,
-                price: item.product.price,
-                quantity: item.quantity,
-                name: item.product.name
-              })),
-              credit_card: {
-                secure: true
-              }
-            };
-            const response = await fetch(midtransUrl, {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Accept': 'application/json',
-                'Authorization': `Basic ${authHeader}`
-              },
-              body: JSON.stringify(midtransRequestBody)
-            });
-            const midtransData = await response.json();
-            if (response.ok && midtransData.token) {
-              midtransToken = midtransData.token;
-              // Update transaction with the Midtrans Token
-              await prisma.transaction.update({
-                where: { id: txn.id },
-                data: { midtransId: midtransToken }
-              });
-            } else {
-              console.error('Midtrans API Error during AI checkout:', midtransData);
-              midtransToken = 'mock-' + invoiceNumber;
-            }
-          } else {
-            midtransToken = 'mock-' + invoiceNumber;
-          }
-
-          toolResult = { success: true, invoiceNumber, totalAmount, midtransToken };
-          clientAction = {
-            type: 'INITIATE_CHECKOUT',
-            payload: {
-              token: midtransToken,
-              transactionId: txn.id,
-              invoiceNumber: txn.invoiceNumber,
-              totalAmount,
-              items: dbItems.map(i => ({ name: i.product.name, price: i.product.price, quantity: i.quantity }))
-            }
-          };
-        } catch (err: any) {
-          toolResult = { success: false, error: err.message };
+          const totalPaid = unpaidKasbons.reduce((sum, k) => sum + k.amount, 0);
+          toolResult = { success: true, buyerName: name, count: unpaidKasbons.length, totalPaid };
+          clientAction = { type: 'UPDATE_DATABASE', payload: null };
         }
+      } catch (err: any) {
+        toolResult = { success: false, error: err.message };
       }
     } 
     

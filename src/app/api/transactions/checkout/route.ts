@@ -7,19 +7,122 @@ const isProduction = false; // Sandbox mode
 
 export async function POST(req: Request) {
   try {
-    const { items } = await req.json();
+    const { items, paymentType, buyerName } = await req.json();
 
     if (!items || items.length === 0) {
       return NextResponse.json({ error: 'Cart is empty' }, { status: 400 });
     }
 
-    if (!serverKey) {
-      return NextResponse.json({ error: 'Midtrans server key is not configured' }, { status: 500 });
-    }
-
     // Retrieve product details and calculate total amount
     const dbItems = [];
     let totalAmount = 0;
+
+    // Handle KASBON payment type
+    if (paymentType === 'KASBON') {
+      if (!buyerName || buyerName.trim() === '') {
+        return NextResponse.json({ error: 'Nama pembeli wajib diisi untuk pembayaran Kasbon' }, { status: 400 });
+      }
+
+      try {
+        const result = await prisma.$transaction(async (tx) => {
+          const transItems = [];
+          let transTotal = 0;
+
+          for (const item of items) {
+            const product = await tx.product.findUnique({
+              where: { sku: item.sku }
+            });
+            
+            if (!product) {
+              throw new Error(`Product with SKU ${item.sku} not found`);
+            }
+
+            if (product.stock < item.quantity) {
+              throw new Error(`Stok untuk ${product.name} tidak cukup. Tersedia: ${product.stock}`);
+            }
+
+            transItems.push({ product, quantity: item.quantity });
+            transTotal += product.price * item.quantity;
+          }
+
+          const invoiceNumber = 'INV-' + Date.now().toString().slice(-8);
+
+          // Create PENDING transaction with KASBON payment type and create Kasbon record
+          const txn = await tx.transaction.create({
+            data: {
+              invoiceNumber,
+              totalAmount: transTotal,
+              paymentStatus: 'PENDING',
+              paymentType: 'KASBON',
+              items: {
+                create: transItems.map((item) => ({
+                  productId: item.product.id,
+                  quantity: item.quantity,
+                  priceAtPurchase: item.product.price
+                }))
+              },
+              kasbon: {
+                create: {
+                  buyerName: buyerName.trim(),
+                  amount: transTotal,
+                  status: 'UNPAID'
+                }
+              }
+            }
+          });
+
+          // Deduct stocks and log stock changes
+          for (const item of transItems) {
+            const updatedProduct = await tx.product.update({
+              where: { id: item.product.id },
+              data: {
+                stock: {
+                  decrement: item.quantity
+                }
+              }
+            });
+
+            await tx.stockLog.create({
+              data: {
+                productId: item.product.id,
+                type: 'STOCK_OUT',
+                quantity: item.quantity,
+                reason: `Kasbon ${invoiceNumber} oleh ${buyerName}`
+              }
+            });
+
+            // Trigger warnings for low stock
+            if (updatedProduct.stock <= updatedProduct.minStock) {
+              await tx.notification.create({
+                data: {
+                  message: `${updatedProduct.name} stok menipis (Sisa ${updatedProduct.stock}, Batas: ${updatedProduct.minStock})`,
+                  type: 'LOW_STOCK'
+                }
+              });
+            }
+          }
+
+          return { txn, totalAmount: transTotal };
+        });
+
+        return NextResponse.json({
+          success: true,
+          token: 'kasbon-' + result.txn.invoiceNumber,
+          redirectUrl: '#',
+          invoiceNumber: result.txn.invoiceNumber,
+          transactionId: result.txn.id,
+          totalAmount: result.totalAmount,
+          paymentType: 'KASBON'
+        });
+
+      } catch (err: any) {
+        return NextResponse.json({ error: err.message }, { status: 400 });
+      }
+    }
+
+    if (!serverKey) {
+      return NextResponse.json({ error: 'Midtrans server key is not configured' }, { status: 500 });
+    }
 
     for (const item of items) {
       const product = await prisma.product.findUnique({

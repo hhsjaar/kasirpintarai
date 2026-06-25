@@ -9,6 +9,87 @@ export type OrbState = 'idle' | 'listening' | 'thinking' | 'speaking';
 // Global array to store active SpeechSynthesisUtterance objects to prevent garbage collection
 const activeUtterances: SpeechSynthesisUtterance[] = [];
 
+// Helper functions for Indonesian voice preprocessing
+const numberToIndonesianWords = (num: number, isRoot: boolean = true): string => {
+  const units = ['', 'satu', 'dua', 'tiga', 'empat', 'lima', 'enam', 'tujuh', 'delapan', 'sembilan', 'sepuluh', 'sebelas'];
+  
+  if (num === 0) return isRoot ? 'nol' : '';
+  
+  let temp = num;
+  let result = '';
+  
+  if (temp < 12) {
+    result = units[temp];
+  } else if (temp < 20) {
+    result = numberToIndonesianWords(temp - 10, false) + ' belas';
+  } else if (temp < 100) {
+    const remainder = temp % 10;
+    result = numberToIndonesianWords(Math.floor(temp / 10), false) + ' puluh ' + (remainder !== 0 ? units[remainder] : '');
+  } else if (temp < 200) {
+    result = 'seratus ' + numberToIndonesianWords(temp - 100, false);
+  } else if (temp < 1000) {
+    const remainder = temp % 100;
+    result = numberToIndonesianWords(Math.floor(temp / 100), false) + ' ratus ' + (remainder !== 0 ? numberToIndonesianWords(remainder, false) : '');
+  } else if (temp < 2000) {
+    result = 'seribu ' + numberToIndonesianWords(temp - 1000, false);
+  } else if (temp < 1000000) {
+    const remainder = temp % 1000;
+    result = numberToIndonesianWords(Math.floor(temp / 1000), false) + ' ribu ' + (remainder !== 0 ? numberToIndonesianWords(remainder, false) : '');
+  } else if (temp < 1000000000) {
+    const remainder = temp % 1000000;
+    result = numberToIndonesianWords(Math.floor(temp / 1000000), false) + ' juta ' + (remainder !== 0 ? numberToIndonesianWords(remainder, false) : '');
+  } else if (temp < 1000000000000) {
+    const remainder = temp % 1000000000;
+    result = numberToIndonesianWords(Math.floor(temp / 1000000000), false) + ' miliar ' + (remainder !== 0 ? numberToIndonesianWords(remainder, false) : '');
+  }
+  
+  return result.replace(/\s+/g, ' ').trim();
+};
+
+const preprocessTextForTTS = (text: string): string => {
+  let processed = text;
+
+  // 1. Strip out invoice numbers entirely (e.g. "Nomor invoice INV-2839213" or just "INV-2839213")
+  processed = processed.replace(/(?:dengan\s+)?nomor\s+invoice\s+INV-[A-Z0-9]+/gi, '');
+  processed = processed.replace(/INV-[A-Z0-9]+/gi, '');
+
+  // 2. Adjust pronunciation of "AI" or "A.I." to sound friendly/conversational as "e ai"
+  processed = processed.replace(/\bA\.?I\.?\b/gi, 'e ai');
+
+  // 3. Convert Rp 3.500 or Rp 3500 -> tiga ribu lima ratus rupiah
+  const currencyRegex = /(?:Rp\.?\s*)(\d+(?:\.\d{3})*)/gi;
+  processed = processed.replace(currencyRegex, (match, numberStr) => {
+    const cleanNumber = parseInt(numberStr.replace(/\./g, ''), 10);
+    if (!isNaN(cleanNumber)) {
+      return numberToIndonesianWords(cleanNumber) + ' rupiah';
+    }
+    return match;
+  });
+
+  // 4. Convert numbers preceding "rupiah"
+  const rupiahSuffixRegex = /(\d+(?:\.\d{3})*)\s*rupiah/gi;
+  processed = processed.replace(rupiahSuffixRegex, (match, numberStr) => {
+    const cleanNumber = parseInt(numberStr.replace(/\./g, ''), 10);
+    if (!isNaN(cleanNumber)) {
+      return numberToIndonesianWords(cleanNumber) + ' rupiah';
+    }
+    return match;
+  });
+
+  // 5. Convert standalone numbers/digits (e.g. quantities like 2, 15)
+  const numberRegex = /\b(\d+)\b/g;
+  processed = processed.replace(numberRegex, (match, numberStr) => {
+    const num = parseInt(numberStr, 10);
+    if (!isNaN(num) && num < 1000000000000) {
+      return numberToIndonesianWords(num);
+    }
+    return match;
+  });
+
+  // Clean double spaces and punctuation gaps
+  return processed.replace(/\s+/g, ' ').replace(/\s+([.,!?])/g, '$1').trim();
+};
+
 interface VoiceOrbProps {
   mode: 'customer' | 'owner';
   cartItems: Array<{ sku: string; quantity: number }>;
@@ -17,6 +98,7 @@ interface VoiceOrbProps {
   compact?: boolean;
   mockCheckoutActive?: boolean;
   voiceCommandToSpeak?: { text: string; timestamp: number };
+  chatLogs?: Array<{ sender: 'user' | 'ai'; text: string }>;
 }
 
 export default function VoiceOrb({
@@ -27,31 +109,74 @@ export default function VoiceOrb({
   compact = false,
   mockCheckoutActive = false,
   voiceCommandToSpeak,
+  chatLogs = [],
 }: VoiceOrbProps) {
   const [state, setState] = useState<OrbState>('idle');
   const [recognitionSupported, setRecognitionSupported] = useState<boolean>(true);
   const [interimTranscript, setInterimTranscript] = useState<string>('');
   const [finalTranscript, setFinalTranscript] = useState<string>('');
   const [hasGreeted, setHasGreeted] = useState<boolean>(false);
+  const [debugLogs, setDebugLogs] = useState<string[]>([]);
+  
+  // 2-Way communication state (interactive hands-free mode)
+  const [isTwoWayMode, setIsTwoWayMode] = useState<boolean>(true);
+  const [isMounted, setIsMounted] = useState<boolean>(false);
+  const [waitingForKasbonName, setWaitingForKasbonName] = useState<boolean>(false);
+
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+  
+  const addDebugLog = (msg: string) => {
+    setDebugLogs(prev => [...prev.slice(-4), `${new Date().toLocaleTimeString()}: ${msg}`]);
+  };
   
   const recognitionRef = useRef<any>(null);
   const isListeningRef = useRef<boolean>(false);
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
   const safetyTimeoutRef = useRef<any>(null);
 
+  // Custom Audio player refs
+  const currentAudioRef = useRef<HTMLAudioElement | null>(null);
+  const isPlayingAudioRef = useRef<boolean>(false);
+  const silenceCountRef = useRef<number>(0);
+
   // Refs to prevent closure staleness in Web Speech API events
   const finalTranscriptRef = useRef<string>('');
   const interimTranscriptRef = useRef<string>('');
   const processSpeechInputRef = useRef<any>(null);
+  const isTwoWayModeRef = useRef<boolean>(true);
+  const stateRef = useRef<OrbState>('idle');
+  const waitingForKasbonNameRef = useRef<boolean>(false);
 
-  // Sync processSpeechInput with its ref on every render
+  useEffect(() => {
+    waitingForKasbonNameRef.current = waitingForKasbonName;
+  }, [waitingForKasbonName]);
+
+  // Sync processSpeechInput and dynamic states with their refs on every render
   useEffect(() => {
     processSpeechInputRef.current = processSpeechInput;
   });
 
+  useEffect(() => {
+    isTwoWayModeRef.current = isTwoWayMode;
+  }, [isTwoWayMode]);
+
+  useEffect(() => {
+    stateRef.current = state;
+  }, [state]);
+
   // Trigger speech when parent requests vocal feedback (e.g. payment confirmations)
   useEffect(() => {
     if (voiceCommandToSpeak && voiceCommandToSpeak.text) {
+      // Stop listening first to prevent audio feedback
+      if (isListeningRef.current) {
+        try {
+          recognitionRef.current?.stop();
+        } catch (err) {
+          console.error('Failed to stop recognition for external voice trigger:', err);
+        }
+      }
       speakResponse(voiceCommandToSpeak.text);
     }
   }, [voiceCommandToSpeak]);
@@ -65,8 +190,39 @@ export default function VoiceOrb({
       if ('speechSynthesis' in window) {
         window.speechSynthesis.cancel();
       }
+      if (currentAudioRef.current) {
+        currentAudioRef.current.pause();
+        currentAudioRef.current = null;
+      }
     };
   }, []);
+
+  // Helper to start recognition automatically
+  const startListeningAutomatically = () => {
+    if (!recognitionRef.current) return;
+    if (stateRef.current === 'thinking' || stateRef.current === 'speaking') {
+      addDebugLog('Skipping auto-start: voice loop busy');
+      return;
+    }
+
+    try {
+      addDebugLog('Auto-starting recognition...');
+      try {
+        recognitionRef.current.stop();
+      } catch (e) {}
+      setTimeout(() => {
+        try {
+          if (!isListeningRef.current && stateRef.current !== 'thinking' && stateRef.current !== 'speaking') {
+            recognitionRef.current.start();
+          }
+        } catch (err) {
+          console.error('Failed to auto-restart recognition:', err);
+        }
+      }, 100);
+    } catch (err) {
+      console.error('Failed to execute auto-start sequence:', err);
+    }
+  };
 
   useEffect(() => {
     // Pre-fetch SpeechSynthesis voices and register fallback loader callback
@@ -79,13 +235,49 @@ export default function VoiceOrb({
       }
     }
 
+    // Global user gesture unlocker for mobile devices (iOS/Android/Safari)
+    const unlockTTS = () => {
+      const isMobileOrSafari = typeof navigator !== 'undefined' && (
+        /iPad|iPhone|iPod|Android/.test(navigator.userAgent) ||
+        (/^((?!chrome|android).)*safari/i.test(navigator.userAgent))
+      );
+      if (isMobileOrSafari) {
+        if ('speechSynthesis' in window) {
+          try {
+            const silentUtterance = new SpeechSynthesisUtterance(' ');
+            silentUtterance.volume = 0;
+            window.speechSynthesis.speak(silentUtterance);
+            console.log('SpeechSynthesis unlocked via global user gesture.');
+          } catch (err) {
+            console.warn('Failed to unlock SpeechSynthesis via global gesture:', err);
+          }
+        }
+        try {
+          const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+          silentAudio.play().catch(() => {});
+          console.log('HTML5 Audio unlocked via global user gesture.');
+        } catch (err) {
+          console.warn('Failed to unlock HTML5 Audio via global gesture:', err);
+        }
+      }
+      // Remove listeners after first interaction
+      window.removeEventListener('click', unlockTTS);
+      window.removeEventListener('touchstart', unlockTTS);
+    };
+
+    window.addEventListener('click', unlockTTS);
+    window.addEventListener('touchstart', unlockTTS);
+
     // Initialize Web Speech API
     const SpeechRecognition =
       (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition;
 
     if (!SpeechRecognition) {
       setRecognitionSupported(false);
-      return;
+      return () => {
+        window.removeEventListener('click', unlockTTS);
+        window.removeEventListener('touchstart', unlockTTS);
+      };
     }
 
     const rec = new SpeechRecognition();
@@ -128,7 +320,14 @@ export default function VoiceOrb({
 
     rec.onerror = (event: any) => {
       console.error('Speech Recognition Error:', event.error);
-      if (event.error !== 'no-speech') {
+      addDebugLog(`Speech Recognition Error: ${event.error}`);
+      
+      if (event.error === 'no-speech') {
+        // Let onend handle the timeout/restart logic
+        return;
+      }
+      
+      if (event.error !== 'aborted') {
         setState('idle');
         isListeningRef.current = false;
       }
@@ -139,44 +338,201 @@ export default function VoiceOrb({
       
       const textToProcess = finalTranscriptRef.current || interimTranscriptRef.current;
       if (textToProcess && textToProcess.trim()) {
+        silenceCountRef.current = 0; // Reset silence counter on valid input
+        
+        // Handle stop/cancel keywords locally to disable 2-way mode smoothly
+        const query = textToProcess.toLowerCase().trim();
+        const stopKeywords = ['stop', 'cukup', 'selesai', 'matikan', 'nonaktifkan', 'batal', 'cancel'];
+        const isStopCommand = stopKeywords.some(keyword => query === keyword || query.startsWith(keyword + ' ') || query.endsWith(' ' + keyword));
+        
+        if (isStopCommand) {
+          setIsTwoWayMode(false);
+          setState('idle');
+          speakResponse('Baik, saya matikan komunikasi dua arah. Sampai jumpa!');
+          return;
+        }
+
         if (processSpeechInputRef.current) {
           processSpeechInputRef.current(textToProcess);
         }
       } else {
-        setState('idle');
+        // Handle silence - automatically restart recognition for continuous loop if two-way mode is active
+        if (isTwoWayModeRef.current) {
+          setState('idle');
+          setTimeout(() => {
+            if (isTwoWayModeRef.current && !isListeningRef.current && stateRef.current !== 'speaking' && stateRef.current !== 'thinking') {
+              try {
+                recognitionRef.current?.stop();
+              } catch (e) {}
+              setTimeout(() => {
+                try {
+                  if (isTwoWayModeRef.current && !isListeningRef.current && stateRef.current !== 'speaking' && stateRef.current !== 'thinking') {
+                    recognitionRef.current?.start();
+                  }
+                } catch (err) {
+                  console.error('Failed to restart recognition on silence:', err);
+                }
+              }, 100);
+            }
+          }, 400);
+        } else {
+          setState('idle');
+        }
       }
     };
 
     recognitionRef.current = rec;
+
+    return () => {
+      window.removeEventListener('click', unlockTTS);
+      window.removeEventListener('touchstart', unlockTTS);
+    };
   }, []);
 
+  const stopAllAudio = () => {
+    // Stop native speechSynthesis if speaking
+    if ('speechSynthesis' in window) {
+      window.speechSynthesis.cancel();
+    }
+    // Stop custom HTML5 audio playing
+    if (currentAudioRef.current) {
+      currentAudioRef.current.pause();
+      currentAudioRef.current = null;
+    }
+    isPlayingAudioRef.current = false;
+    if (safetyTimeoutRef.current) {
+      clearTimeout(safetyTimeoutRef.current);
+      safetyTimeoutRef.current = null;
+    }
+  };
+
+  const splitTextIntoChunks = (text: string): string[] => {
+    const cleanText = text.replace(/\s+/g, ' ').trim();
+    // Split by sentence ending punctuation and newlines
+    const sentences = cleanText.match(/[^.!?;\n]+[.!?;\n]*/g) || [cleanText];
+    const chunks: string[] = [];
+    let currentChunk = '';
+
+    for (const sentence of sentences) {
+      if ((currentChunk + sentence).length > 150) {
+        if (currentChunk.trim()) {
+          chunks.push(currentChunk.trim());
+        }
+        currentChunk = sentence;
+      } else {
+        currentChunk += ' ' + sentence;
+      }
+    }
+    if (currentChunk.trim()) {
+      chunks.push(currentChunk.trim());
+    }
+    return chunks.filter(c => c.length > 0);
+  };
+
+  const playAudioChunks = (chunks: string[]): Promise<void> => {
+    return new Promise((resolve, reject) => {
+      let index = 0;
+      
+      const playNext = () => {
+        if (!isPlayingAudioRef.current) {
+          resolve();
+          return;
+        }
+        if (index >= chunks.length) {
+          resolve();
+          return;
+        }
+
+        const chunk = chunks[index];
+        index++;
+        
+        const url = `/api/tts?text=${encodeURIComponent(chunk)}`;
+        const audio = new Audio(url);
+        currentAudioRef.current = audio;
+        
+        audio.onended = () => {
+          playNext();
+        };
+        
+        audio.onerror = (e) => {
+          console.error('Audio chunk playback error:', e);
+          if (index === 1) {
+            reject(new Error('TTS Service Unavailable'));
+          } else {
+            playNext();
+          }
+        };
+
+        audio.play().catch(err => {
+          console.error('Failed to play audio chunk:', err);
+          reject(err);
+        });
+      };
+
+      playNext();
+    });
+  };
+
   const toggleListening = () => {
+    addDebugLog('toggleListening called, state: ' + state);
+    
+    // Unlock Speech Synthesis and HTML5 Audio for iOS/Safari & Android browsers in click handler context
+    const isMobileOrSafari = typeof navigator !== 'undefined' && (
+      /iPad|iPhone|iPod|Android/.test(navigator.userAgent) ||
+      (/^((?!chrome|android).)*safari/i.test(navigator.userAgent))
+    );
+    if (isMobileOrSafari) {
+      if ('speechSynthesis' in window) {
+        try {
+          const silentUtterance = new SpeechSynthesisUtterance(' ');
+          silentUtterance.volume = 0;
+          window.speechSynthesis.speak(silentUtterance);
+        } catch (err) {
+          console.warn('Failed to unlock SpeechSynthesis:', err);
+        }
+      }
+      try {
+        const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
+        silentAudio.play().catch(() => {});
+      } catch (err) {}
+    }
+
     if (!recognitionSupported) {
       alert('Perekaman suara (Speech Recognition) tidak didukung di browser ini. Silakan gunakan Google Chrome atau Safari.');
       return;
     }
 
     if (state === 'speaking') {
-      // Stop speaking
-      if (safetyTimeoutRef.current) {
-        clearTimeout(safetyTimeoutRef.current);
-        safetyTimeoutRef.current = null;
-      }
-      if ('speechSynthesis' in window) {
-        if (activeUtteranceRef.current) {
-          activeUtteranceRef.current.onstart = null;
-          activeUtteranceRef.current.onend = null;
-          activeUtteranceRef.current.onerror = null;
-        }
-        window.speechSynthesis.cancel();
-      }
+      // User clicked while AI was speaking - stop audio and start listening immediately (continuous loop remains active)
+      stopAllAudio();
+      setIsTwoWayMode(true);
       setState('idle');
+      setTimeout(() => {
+        try {
+          recognitionRef.current?.stop();
+        } catch (e) {}
+        setTimeout(() => {
+          try {
+            recognitionRef.current?.start();
+          } catch (err) {
+            console.error('Failed to start recognition after speaking interruption:', err);
+          }
+        }, 100);
+      }, 50);
       return;
     }
 
     if (state === 'listening') {
-      recognitionRef.current?.stop();
+      // User clicked while listening - stop listening and disable continuous hands-free mode (mute)
+      setIsTwoWayMode(false);
+      try {
+        recognitionRef.current?.stop();
+      } catch (e) {}
+      setState('idle');
     } else {
+      // User clicked while idle - enable continuous hands-free mode and start listening
+      setIsTwoWayMode(true);
+      
       // If customer clicks the mic for the first time, greet them first!
       if (!hasGreeted && mode === 'customer') {
         setHasGreeted(true);
@@ -187,13 +543,19 @@ export default function VoiceOrb({
       }
 
       try {
-        // Cancel any speaking first
-        if ('speechSynthesis' in window) {
-          window.speechSynthesis.cancel();
-        }
-        recognitionRef.current?.start();
+        stopAllAudio();
+        try {
+          recognitionRef.current?.stop();
+        } catch (e) {}
+        setTimeout(() => {
+          try {
+            recognitionRef.current?.start();
+          } catch (err) {
+            console.error('Failed to start recognition:', err);
+          }
+        }, 100);
       } catch (err) {
-        console.error('Failed to start recognition:', err);
+        console.error('Failed to initiate start sequence:', err);
       }
     }
   };
@@ -215,14 +577,31 @@ export default function VoiceOrb({
       }
     }
 
+    // Determine final message to send based on context
+    let finalMessage = text;
+    if (waitingForKasbonNameRef.current) {
+      finalMessage = `kasbon atas nama ${text}`;
+      setWaitingForKasbonName(false);
+    }
+
+    // Format conversation history for Gemini context (last 10 turns)
+    const history = (chatLogs || [])
+      .filter(log => log.text && log.text.trim() !== '')
+      .slice(-10)
+      .map(log => ({
+        role: log.sender === 'user' ? 'user' : 'model',
+        parts: [{ text: log.text }]
+      }));
+
     try {
       const response = await fetch('/api/ai', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          message: text,
+          message: finalMessage,
           mode,
           cartItems,
+          history,
         }),
       });
 
@@ -237,6 +616,19 @@ export default function VoiceOrb({
       // Execute client-side action if any
       if (data.action) {
         onActionTriggered(data.action.type, data.action.payload);
+        
+        if (data.action.type === 'ASK_KASBON_NAME') {
+          setWaitingForKasbonName(true);
+        }
+      } else {
+        // Fallback: If response conversationally asks for the buyer's name for a kasbon checkout, trigger context
+        const lowerResponse = (data.response || '').toLowerCase();
+        if (
+          (lowerResponse.includes('nama lengkap') || lowerResponse.includes('atas nama siapa') || lowerResponse.includes('boleh tahu nama') || lowerResponse.includes('siapa ya')) &&
+          (lowerResponse.includes('kasbon') || lowerResponse.includes('hutang') || lowerResponse.includes('pembukuan'))
+        ) {
+          setWaitingForKasbonName(true);
+        }
       }
 
       // Voice read back
@@ -249,57 +641,100 @@ export default function VoiceOrb({
     }
   };
 
-  const speakResponse = (text: string) => {
-    if (!('speechSynthesis' in window)) {
+  const speakResponse = async (text: string) => {
+    addDebugLog(`speakResponse: "${text.substring(0, 20)}..."`);
+    
+    // Clean up previous event listeners, audios, and timeouts
+    stopAllAudio();
+
+    // Preprocess text to convert currency and standalone digits to Indonesian words (terbilang)
+    const cleanText = preprocessTextForTTS(text);
+    addDebugLog(`Cleaned speech text: "${cleanText.substring(0, 20)}..."`);
+
+    // Check if the output text is a deactivation/goodbye response
+    const lowerText = text.toLowerCase();
+    const isDeactivationResponse = lowerText.includes('nonaktifkan') || lowerText.includes('matikan') || lowerText.includes('sampai jumpa');
+
+    // Use custom server-side TTS proxy as the primary stable player
+    const chunks = splitTextIntoChunks(cleanText);
+    if (chunks.length === 0) {
       setState('idle');
       return;
     }
 
-    // Clean up previous event listeners and timeouts
-    if (activeUtteranceRef.current) {
-      activeUtteranceRef.current.onstart = null;
-      activeUtteranceRef.current.onend = null;
-      activeUtteranceRef.current.onerror = null;
-    }
-    if (safetyTimeoutRef.current) {
-      clearTimeout(safetyTimeoutRef.current);
-      safetyTimeoutRef.current = null;
-    }
+    setState('speaking');
+    isPlayingAudioRef.current = true;
 
-    // Cancel active speech with Chrome workaround (resume first)
     try {
-      window.speechSynthesis.resume();
-      window.speechSynthesis.cancel();
+      await playAudioChunks(chunks);
+      
+      // Finished speaking successfully
+      setState('idle');
+      isPlayingAudioRef.current = false;
+      
+      // Auto-restart listening if 2-way mode is active
+      if (isTwoWayModeRef.current && !isDeactivationResponse) {
+        setTimeout(() => {
+          startListeningAutomatically();
+        }, 400);
+      }
     } catch (err) {
-      console.error('SpeechSynthesis cancel error:', err);
+      console.warn('Custom server-side TTS failed, falling back to Web SpeechSynthesis:', err);
+      speakResponseFallback(cleanText, isDeactivationResponse);
+    }
+  };
+
+  const speakResponseFallback = (text: string, isDeactivationResponse: boolean) => {
+    if (!('speechSynthesis' in window)) {
+      addDebugLog('ERROR: speechSynthesis not in window');
+      setState('idle');
+      return;
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
     
-    // Choose voice dynamically with robust fallbacks
+    // Choose voice dynamically with robust fallbacks prioritizing Indonesian
     const voices = window.speechSynthesis.getVoices();
-    let selectedVoice = voices.find(v => v.lang.startsWith('id') || v.lang.includes('ID') || v.lang.startsWith('ms'));
     
+    // 1. Try exact match for Indonesian (id-ID)
+    let selectedVoice = voices.find(v => {
+      const l = v.lang.toLowerCase().replace('_', '-');
+      return l === 'id-id';
+    });
+    
+    // 2. Try any language code starting with 'id'
+    if (!selectedVoice) {
+      selectedVoice = voices.find(v => {
+        const l = v.lang.toLowerCase().replace('_', '-');
+        return l.startsWith('id');
+      });
+    }
+
+    // 3. Try to match if name has "indonesia"
+    if (!selectedVoice) {
+      selectedVoice = voices.find(v => v.name.toLowerCase().includes('indonesia'));
+    }
+
+    // 4. Fallback to Malay (ms) only as a last resort if Indonesian is not installed
+    if (!selectedVoice) {
+      selectedVoice = voices.find(v => {
+        const l = v.lang.toLowerCase().replace('_', '-');
+        return l.startsWith('ms');
+      });
+    }
+
     if (selectedVoice) {
       utterance.voice = selectedVoice;
-      utterance.lang = 'id-ID';
+      utterance.lang = selectedVoice.lang.toLowerCase().startsWith('ms') ? selectedVoice.lang : 'id-ID';
+      console.log(`Fallback Voice selected: ${selectedVoice.name} (${selectedVoice.lang})`);
     } else {
-      // Fallback to default or English voice to prevent silent failures on systems without Indonesian voice packages
-      selectedVoice = voices.find(v => v.default) || voices.find(v => v.lang.startsWith('en')) || voices[0];
-      if (selectedVoice) {
-        utterance.voice = selectedVoice;
-        utterance.lang = selectedVoice.lang;
-        console.warn(`Indonesian voice not found. Falling back to ${selectedVoice.name} (${selectedVoice.lang})`);
-      } else {
-        utterance.lang = 'id-ID';
-      }
+      utterance.lang = 'id-ID';
     }
 
     utterance.volume = 1.0;
     utterance.rate = 1.0;
     utterance.pitch = 1.0;
 
-    // Pin to global array to prevent V8 garbage collection bug in Chrome
     activeUtterances.push(utterance);
 
     // Periodically trigger resume to prevent Chrome from pausing speech synthesis randomly
@@ -311,7 +746,6 @@ export default function VoiceOrb({
       }
     }, 2000);
 
-    // Estimate reading duration (approx. 12 characters per second + 3.5s padding)
     const estimatedMs = Math.max(3000, (text.length / 12) * 1000 + 3500);
 
     const cleanupAndIdle = () => {
@@ -323,7 +757,6 @@ export default function VoiceOrb({
       }
       activeUtteranceRef.current = null;
       
-      // Unpin from global array
       const idx = activeUtterances.indexOf(utterance);
       if (idx > -1) {
         activeUtterances.splice(idx, 1);
@@ -331,8 +764,11 @@ export default function VoiceOrb({
     };
 
     safetyTimeoutRef.current = setTimeout(() => {
-      console.warn('Speech synthesis safety timeout triggered.');
+      addDebugLog('fallback safety timeout triggered!');
       cleanupAndIdle();
+      if (isTwoWayModeRef.current && !isDeactivationResponse) {
+        startListeningAutomatically();
+      }
     }, estimatedMs);
 
     utterance.onstart = () => {
@@ -341,34 +777,28 @@ export default function VoiceOrb({
 
     utterance.onend = () => {
       cleanupAndIdle();
-      // Auto-restart Speech Recognition for Siri-like hands-free interactive conversation flow
-      if (recognitionRef.current && !isListeningRef.current) {
-        try {
-          recognitionRef.current.start();
-        } catch (err) {
-          console.error('Failed to auto-restart recognition:', err);
-        }
+      if (isTwoWayModeRef.current && !isDeactivationResponse) {
+        setTimeout(() => {
+          startListeningAutomatically();
+        }, 400);
       }
     };
 
     utterance.onerror = (e: any) => {
-      if (e.error !== 'interrupted' && e.error !== 'canceled') {
-        console.error('Speech synthesis error:', e);
-      }
       cleanupAndIdle();
+      if (isTwoWayModeRef.current && !isDeactivationResponse) {
+        startListeningAutomatically();
+      }
     };
 
     activeUtteranceRef.current = utterance;
-    
-    // Set state immediately to speaking (or at least transition) to prevent browser freezes
     setState('speaking');
 
     try {
       window.speechSynthesis.speak(utterance);
-      // Force play audio immediately
       window.speechSynthesis.resume();
-    } catch (err) {
-      console.error('Failed to speak utterance:', err);
+    } catch (err: any) {
+      console.error('Failed to speak fallback utterance:', err);
       cleanupAndIdle();
     }
   };
@@ -376,6 +806,22 @@ export default function VoiceOrb({
   // Trigger manually via keyboard text input if testing without mic
   const handleTextSubmit = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+
+    // Unlock Speech Synthesis for iOS/Safari & Android browsers on manual text submit
+    const isMobileOrSafari = typeof navigator !== 'undefined' && (
+      /iPad|iPhone|iPod|Android/.test(navigator.userAgent) ||
+      (/^((?!chrome|android).)*safari/i.test(navigator.userAgent))
+    );
+    if (isMobileOrSafari && 'speechSynthesis' in window) {
+      try {
+        const silentUtterance = new SpeechSynthesisUtterance(' ');
+        silentUtterance.volume = 0;
+        window.speechSynthesis.speak(silentUtterance);
+      } catch (err) {
+        console.warn('Failed to unlock SpeechSynthesis on submit:', err);
+      }
+    }
+
     const formData = new FormData(e.currentTarget);
     const text = formData.get('manualInput') as string;
     if (text && text.trim()) {
