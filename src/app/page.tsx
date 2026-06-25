@@ -78,11 +78,9 @@ export default function Home() {
       });
       if (res.ok) {
         triggerToast('Pembayaran berhasil dikonfirmasi!', 'success');
-        setCart([]);
-        setDashboardRefreshTrigger((prev) => prev + 1);
-        handleTranscriptReceived("", "Pembayaran berhasil dikonfirmasi! Terima kasih telah berbelanja di Kasir Pintar.");
+        handleTranscriptReceived("", "Pesanan berhasil dan transaksi sukses. Terima kasih telah berbelanja di Kasir Pintar.");
         setVoiceCommandToSpeak({
-          text: "Pembayaran berhasil dikonfirmasi! Terima kasih telah berbelanja di Kasir Pintar.",
+          text: "Pesanan berhasil dan transaksi sukses. Terima kasih telah berbelanja di Kasir Pintar.",
           timestamp: Date.now()
         });
       } else {
@@ -122,14 +120,20 @@ export default function Home() {
         onSuccess: function (result: any) {
           console.log('Midtrans Payment Success:', result);
           triggerToast('Pembayaran berhasil dikonfirmasi!', 'success');
-          setCart([]); // Clear cart
-          setDashboardRefreshTrigger((prev) => prev + 1); // Refresh dashboard metrics
+          handleTranscriptReceived("", "Pesanan berhasil dan transaksi sukses. Terima kasih telah berbelanja di Kasir Pintar.");
+          setVoiceCommandToSpeak({
+            text: "Pesanan berhasil dan transaksi sukses. Terima kasih telah berbelanja di Kasir Pintar.",
+            timestamp: Date.now()
+          });
         },
         onPending: function (result: any) {
           console.log('Midtrans Payment Pending:', result);
           triggerToast('Pembayaran tertunda. Harap selesaikan pembayaran.', 'alert');
-          setCart([]); // Clear cart
-          setDashboardRefreshTrigger((prev) => prev + 1);
+          handleTranscriptReceived("", "Pesanan berhasil dan transaksi sukses. Terima kasih telah berbelanja di Kasir Pintar.");
+          setVoiceCommandToSpeak({
+            text: "Pesanan berhasil dan transaksi sukses. Terima kasih telah berbelanja di Kasir Pintar.",
+            timestamp: Date.now()
+          });
         },
         onError: function (result: any) {
           console.error('Midtrans Payment Error:', result);
@@ -141,6 +145,16 @@ export default function Home() {
       });
     } else {
       triggerToast('Gagal memuat Midtrans Snap SDK. Silakan muat ulang halaman.', 'alert');
+    }
+  };
+
+  const handleSpeakingFinished = (text: string) => {
+    const lowerText = text.toLowerCase();
+    if (lowerText.includes('pesanan berhasil') || lowerText.includes('transaksi sukses')) {
+      console.log('Voice confirmation completed. Refreshing chatbot session...');
+      setCart([]);
+      setChatLogs([]);
+      setDashboardRefreshTrigger((prev) => prev + 1);
     }
   };
 
@@ -201,9 +215,7 @@ export default function Home() {
 
       case 'KASBON_CHECKOUT_SUCCESS': {
         const { totalAmount, buyerName } = payload;
-        setCart([]);
         triggerToast(`Kasbon dicatat: Rp ${totalAmount.toLocaleString('id-ID')} atas nama ${buyerName}`, 'success');
-        setDashboardRefreshTrigger((prev) => prev + 1);
         break;
       }
 
@@ -279,13 +291,11 @@ export default function Home() {
       if (data.success) {
         setShowCheckoutModal(false);
         if (manualPaymentType === 'KASBON') {
-          setCart([]);
           setManualBuyerName('');
           triggerToast(`Kasbon berhasil dicatat atas nama ${data.buyerName || manualBuyerName}`, 'success');
-          setDashboardRefreshTrigger((prev) => prev + 1);
-          handleTranscriptReceived("", `Transaksi Kasbon berhasil dicatat atas nama "${data.buyerName || manualBuyerName}" sebesar Rp ${data.totalAmount.toLocaleString('id-ID')}.`);
+          handleTranscriptReceived("", `Pesanan berhasil dan transaksi sukses. Transaksi Kasbon berhasil dicatat atas nama "${data.buyerName || manualBuyerName}" sebesar Rp ${data.totalAmount.toLocaleString('id-ID')}.`);
           setVoiceCommandToSpeak({
-            text: `Kasbon berhasil dicatat atas nama ${data.buyerName || manualBuyerName} sebesar ${data.totalAmount} rupiah.`,
+            text: `Pesanan berhasil dan transaksi sukses. Kasbon berhasil dicatat atas nama ${data.buyerName || manualBuyerName} sebesar ${data.totalAmount} rupiah.`,
             timestamp: Date.now()
           });
         } else {
@@ -395,6 +405,7 @@ export default function Home() {
                   mockCheckoutActive={!!mockCheckout}
                   voiceCommandToSpeak={voiceCommandToSpeak}
                   chatLogs={chatLogs}
+                  onSpeakingFinished={handleSpeakingFinished}
                 />
               </div>
 
@@ -586,6 +597,7 @@ export default function Home() {
                   onTranscriptReceived={handleTranscriptReceived}
                   compact={true}
                   chatLogs={chatLogs}
+                  onSpeakingFinished={handleSpeakingFinished}
                 />
               </div>
             </div>

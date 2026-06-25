@@ -12,12 +12,12 @@ const activeUtterances: SpeechSynthesisUtterance[] = [];
 // Helper functions for Indonesian voice preprocessing
 const numberToIndonesianWords = (num: number, isRoot: boolean = true): string => {
   const units = ['', 'satu', 'dua', 'tiga', 'empat', 'lima', 'enam', 'tujuh', 'delapan', 'sembilan', 'sepuluh', 'sebelas'];
-  
+
   if (num === 0) return isRoot ? 'nol' : '';
-  
+
   let temp = num;
   let result = '';
-  
+
   if (temp < 12) {
     result = units[temp];
   } else if (temp < 20) {
@@ -42,7 +42,7 @@ const numberToIndonesianWords = (num: number, isRoot: boolean = true): string =>
     const remainder = temp % 1000000000;
     result = numberToIndonesianWords(Math.floor(temp / 1000000000), false) + ' miliar ' + (remainder !== 0 ? numberToIndonesianWords(remainder, false) : '');
   }
-  
+
   return result.replace(/\s+/g, ' ').trim();
 };
 
@@ -55,6 +55,9 @@ const preprocessTextForTTS = (text: string): string => {
 
   // 2. Adjust pronunciation of "AI" or "A.I." to sound friendly/conversational as "e ai"
   processed = processed.replace(/\bA\.?I\.?\b/gi, 'e ai');
+
+  // Adjust pronunciation of "QRIS" to sound friendly/conversational as "kris"
+  processed = processed.replace(/\bQRIS\b/gi, 'kris');
 
   // 3. Convert Rp 3.500 or Rp 3500 -> tiga ribu lima ratus rupiah
   const currencyRegex = /(?:Rp\.?\s*)(\d+(?:\.\d{3})*)/gi;
@@ -94,7 +97,7 @@ function filterSpeechTranscript(text: string, allowedProducts: Set<string>): str
   if (!text) return '';
   const words = text.split(/\s+/);
   const filteredWords: string[] = [];
-  
+
   const baseAllowed = new Set([
     // Greetings & Politeness
     'selamat', 'datang', 'pagi', 'siang', 'sore', 'malam', 'halo', 'hai', 'permisi',
@@ -128,9 +131,9 @@ function filterSpeechTranscript(text: string, allowedProducts: Set<string>): str
   ];
 
   words.forEach((w) => {
-    const cleanWord = w.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+    const cleanWord = w.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
     if (!cleanWord) return;
-    
+
     const isDigit = /^\d+$/.test(cleanWord);
     if (isDigit) {
       filteredWords.push(w);
@@ -174,6 +177,7 @@ interface VoiceOrbProps {
   mockCheckoutActive?: boolean;
   voiceCommandToSpeak?: { text: string; timestamp: number };
   chatLogs?: Array<{ sender: 'user' | 'ai'; text: string }>;
+  onSpeakingFinished?: (text: string) => void;
 }
 
 export default function VoiceOrb({
@@ -185,6 +189,7 @@ export default function VoiceOrb({
   mockCheckoutActive = false,
   voiceCommandToSpeak,
   chatLogs = [],
+  onSpeakingFinished,
 }: VoiceOrbProps) {
   const [state, setState] = useState<OrbState>('idle');
   const [recognitionSupported, setRecognitionSupported] = useState<boolean>(true);
@@ -192,7 +197,7 @@ export default function VoiceOrb({
   const [finalTranscript, setFinalTranscript] = useState<string>('');
   const [hasGreeted, setHasGreeted] = useState<boolean>(false);
   const [debugLogs, setDebugLogs] = useState<string[]>([]);
-  
+
   // 2-Way communication state (interactive hands-free mode)
   const [isTwoWayMode, setIsTwoWayMode] = useState<boolean>(true);
   const [isMounted, setIsMounted] = useState<boolean>(false);
@@ -209,11 +214,11 @@ export default function VoiceOrb({
           const words = new Set<string>();
           data.forEach((p: any) => {
             p.name.toLowerCase().split(/\s+/).forEach((w: string) => {
-              const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+              const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
               if (clean) words.add(clean);
             });
             p.sku.toLowerCase().split(/\s+/).forEach((w: string) => {
-              const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+              const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
               if (clean) words.add(clean);
             });
           });
@@ -225,11 +230,11 @@ export default function VoiceOrb({
     };
     fetchProducts();
   }, []);
-  
+
   const addDebugLog = (msg: string) => {
     setDebugLogs(prev => [...prev.slice(-4), `${new Date().toLocaleTimeString()}: ${msg}`]);
   };
-  
+
   const recognitionRef = useRef<any>(null);
   const isListeningRef = useRef<boolean>(false);
   const activeUtteranceRef = useRef<SpeechSynthesisUtterance | null>(null);
@@ -248,6 +253,15 @@ export default function VoiceOrb({
   const stateRef = useRef<OrbState>('idle');
   const waitingForKasbonNameRef = useRef<boolean>(false);
   const allowedProductWordsRef = useRef<Set<string>>(new Set());
+  const accumulatedTranscriptRef = useRef<string>('');
+  const hasSpokenCukupRef = useRef<boolean>(false);
+
+  // Sync props to refs synchronously on every render
+  const cartItemsRef = useRef<typeof cartItems>(cartItems);
+  cartItemsRef.current = cartItems;
+
+  const chatLogsRef = useRef<typeof chatLogs>(chatLogs);
+  chatLogsRef.current = chatLogs;
 
   useEffect(() => {
     waitingForKasbonNameRef.current = waitingForKasbonName;
@@ -269,6 +283,12 @@ export default function VoiceOrb({
   useEffect(() => {
     stateRef.current = state;
   }, [state]);
+
+  useEffect(() => {
+    if (chatLogsRef.current && chatLogsRef.current.length === 0) {
+      setHasGreeted(false);
+    }
+  }, [chatLogs]);
 
   // Trigger speech when parent requests vocal feedback (e.g. payment confirmations)
   useEffect(() => {
@@ -313,7 +333,7 @@ export default function VoiceOrb({
       addDebugLog('Auto-starting recognition...');
       try {
         recognitionRef.current.stop();
-      } catch (e) {}
+      } catch (e) { }
       setTimeout(() => {
         try {
           if (!isListeningRef.current && stateRef.current !== 'thinking' && stateRef.current !== 'speaking') {
@@ -358,7 +378,7 @@ export default function VoiceOrb({
         }
         try {
           const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-          silentAudio.play().catch(() => {});
+          silentAudio.play().catch(() => { });
           console.log('HTML5 Audio unlocked via global user gesture.');
         } catch (err) {
           console.warn('Failed to unlock HTML5 Audio via global gesture:', err);
@@ -396,6 +416,7 @@ export default function VoiceOrb({
       setFinalTranscript('');
       finalTranscriptRef.current = '';
       interimTranscriptRef.current = '';
+      hasSpokenCukupRef.current = false;
     };
 
     rec.onresult = (event: any) => {
@@ -412,29 +433,32 @@ export default function VoiceOrb({
 
       setInterimTranscript(currentInterim);
       interimTranscriptRef.current = currentInterim;
-      
+
       setFinalTranscript(cumulativeFinal.trim());
       finalTranscriptRef.current = cumulativeFinal.trim();
 
       // Check for 'cukup' keyword to stop recording
       const checkText = (cumulativeFinal + ' ' + currentInterim).toLowerCase();
-      if (checkText.includes('cukup')) {
-        addDebugLog('Detected "cukup" trigger! Stopping speech recognition...');
-        try {
-          recognitionRef.current?.stop();
-        } catch (e) {}
+      if (checkText.includes('cukup') && !hasSpokenCukupRef.current) {
+        hasSpokenCukupRef.current = true;
+        addDebugLog('Detected "cukup" trigger! Stopping speech recognition soon...');
+        setTimeout(() => {
+          try {
+            recognitionRef.current?.stop();
+          } catch (e) { }
+        }, 200);
       }
     };
 
     rec.onerror = (event: any) => {
       console.error('Speech Recognition Error:', event.error);
       addDebugLog(`Speech Recognition Error: ${event.error}`);
-      
+
       if (event.error === 'no-speech') {
         // Let onend handle the timeout/restart logic
         return;
       }
-      
+
       if (event.error !== 'aborted') {
         setState('idle');
         isListeningRef.current = false;
@@ -443,9 +467,11 @@ export default function VoiceOrb({
 
     rec.onend = () => {
       isListeningRef.current = false;
-      
+
       const rawText = (finalTranscriptRef.current + ' ' + interimTranscriptRef.current).trim();
-      
+      const hasCukup = hasSpokenCukupRef.current;
+      hasSpokenCukupRef.current = false; // Reset flag immediately
+
       // Clear transcript states for next session
       setInterimTranscript('');
       setFinalTranscript('');
@@ -454,43 +480,76 @@ export default function VoiceOrb({
 
       if (rawText) {
         silenceCountRef.current = 0; // Reset silence counter on valid input
-        
+
         // Strip the word "cukup" (and some variations/symbols)
         let cleanRaw = rawText.replace(/\b(cukup|sudah cukup)\b/gi, '').trim();
-        
+
         // Normalize "kris" and "keris" pronunciation variants to standard "qris"
         cleanRaw = cleanRaw.replace(/\b(kris|keris)\b/gi, 'qris');
-        
+
         // Handle stop/cancel keywords locally to disable 2-way mode smoothly
         const query = cleanRaw.toLowerCase();
         const stopKeywords = ['stop', 'matikan', 'nonaktifkan', 'batal', 'cancel'];
         const isStopCommand = stopKeywords.some(keyword => query === keyword || query.startsWith(keyword + ' ') || query.endsWith(' ' + keyword));
-        
+
         if (isStopCommand) {
           setIsTwoWayMode(false);
           setState('idle');
           speakResponse('Baik, saya matikan komunikasi dua arah. Sampai jumpa!');
+          accumulatedTranscriptRef.current = ''; // Clear buffer on stop command
           return;
         }
 
-        // Apply product-aware and grammar keyword filter!
-        // If we are waiting for a Kasbon name, we bypass the filter to avoid discarding the user's name.
-        const filteredText = waitingForKasbonNameRef.current 
-          ? cleanRaw 
-          : filterSpeechTranscript(cleanRaw, allowedProductWordsRef.current);
-        addDebugLog(`Raw speech: "${rawText}" -> Filtered speech: "${filteredText}"`);
+        // Check if the user said "Cukup" or if 2-way mode was explicitly turned off (manual stop)
+        const shouldProcess = hasCukup || !isTwoWayModeRef.current;
 
-        if (filteredText.trim()) {
-          if (processSpeechInputRef.current) {
-            processSpeechInputRef.current(filteredText);
+        if (shouldProcess) {
+          // Combine previous buffered transcript with the current one
+          const combinedText = (accumulatedTranscriptRef.current + ' ' + cleanRaw).trim();
+          accumulatedTranscriptRef.current = ''; // Clear buffer since we are processing it
+
+          if (combinedText) {
+            // Apply product-aware and grammar keyword filter!
+            // If we are waiting for a Kasbon name, we bypass the filter to avoid discarding the user's name.
+            const filteredText = waitingForKasbonNameRef.current
+              ? combinedText
+              : filterSpeechTranscript(combinedText, allowedProductWordsRef.current);
+            addDebugLog(`Raw combined speech: "${combinedText}" -> Filtered speech: "${filteredText}"`);
+
+            if (filteredText.trim()) {
+              if (processSpeechInputRef.current) {
+                processSpeechInputRef.current(filteredText);
+              }
+            } else {
+              // If the filtered text is empty (trash input/background noise), restart automatically if in 2-way mode
+              if (isTwoWayModeRef.current) {
+                setState('idle');
+                setTimeout(() => {
+                  startListeningAutomatically();
+                }, 400);
+              } else {
+                setState('idle');
+              }
+            }
+          } else {
+            // Nothing to process, just go to idle
+            setState('idle');
+            if (isTwoWayModeRef.current) {
+              setTimeout(() => {
+                startListeningAutomatically();
+              }, 400);
+            }
           }
         } else {
-          // If the filtered text is empty (trash input/background noise), restart automatically if in 2-way mode
+          // User paused but DID NOT say "cukup". Buffer the text and restart the microphone automatically!
+          accumulatedTranscriptRef.current = (accumulatedTranscriptRef.current + ' ' + cleanRaw).trim();
+          addDebugLog(`Timeout without "cukup". Buffered: "${accumulatedTranscriptRef.current}". Restarting mic...`);
+
           if (isTwoWayModeRef.current) {
             setState('idle');
             setTimeout(() => {
               startListeningAutomatically();
-            }, 400);
+            }, 200);
           } else {
             setState('idle');
           }
@@ -503,7 +562,7 @@ export default function VoiceOrb({
             if (isTwoWayModeRef.current && !isListeningRef.current && stateRef.current !== 'speaking' && stateRef.current !== 'thinking') {
               try {
                 recognitionRef.current?.stop();
-              } catch (e) {}
+              } catch (e) { }
               setTimeout(() => {
                 try {
                   if (isTwoWayModeRef.current && !isListeningRef.current && stateRef.current !== 'speaking' && stateRef.current !== 'thinking') {
@@ -572,7 +631,7 @@ export default function VoiceOrb({
   const playAudioChunks = (chunks: string[]): Promise<void> => {
     return new Promise((resolve, reject) => {
       let index = 0;
-      
+
       const playNext = () => {
         if (!isPlayingAudioRef.current) {
           resolve();
@@ -585,15 +644,15 @@ export default function VoiceOrb({
 
         const chunk = chunks[index];
         index++;
-        
+
         const url = `/api/tts?text=${encodeURIComponent(chunk)}`;
         const audio = new Audio(url);
         currentAudioRef.current = audio;
-        
+
         audio.onended = () => {
           playNext();
         };
-        
+
         audio.onerror = (e) => {
           console.error('Audio chunk playback error:', e);
           if (index === 1) {
@@ -615,7 +674,7 @@ export default function VoiceOrb({
 
   const toggleListening = () => {
     addDebugLog('toggleListening called, state: ' + state);
-    
+
     // Unlock Speech Synthesis and HTML5 Audio for iOS/Safari & Android browsers in click handler context
     const isMobileOrSafari = typeof navigator !== 'undefined' && (
       /iPad|iPhone|iPod|Android/.test(navigator.userAgent) ||
@@ -633,8 +692,8 @@ export default function VoiceOrb({
       }
       try {
         const silentAudio = new Audio('data:audio/wav;base64,UklGRigAAABXQVZFZm10IBIAAAABAAEARKwAAIhYAQACABAAAABkYXRhAgAAAAEA');
-        silentAudio.play().catch(() => {});
-      } catch (err) {}
+        silentAudio.play().catch(() => { });
+      } catch (err) { }
     }
 
     if (!recognitionSupported) {
@@ -650,7 +709,7 @@ export default function VoiceOrb({
       setTimeout(() => {
         try {
           recognitionRef.current?.stop();
-        } catch (e) {}
+        } catch (e) { }
         setTimeout(() => {
           try {
             recognitionRef.current?.start();
@@ -665,14 +724,16 @@ export default function VoiceOrb({
     if (state === 'listening') {
       // User clicked while listening - stop listening and disable continuous hands-free mode (mute)
       setIsTwoWayMode(false);
+      accumulatedTranscriptRef.current = ''; // Clear buffer on manual cancel
       try {
         recognitionRef.current?.stop();
-      } catch (e) {}
+      } catch (e) { }
       setState('idle');
     } else {
       // User clicked while idle - enable continuous hands-free mode and start listening
       setIsTwoWayMode(true);
-      
+      accumulatedTranscriptRef.current = ''; // Clear buffer on manual start
+
       // If customer clicks the mic for the first time, greet them first!
       if (!hasGreeted && mode === 'customer') {
         setHasGreeted(true);
@@ -686,7 +747,7 @@ export default function VoiceOrb({
         stopAllAudio();
         try {
           recognitionRef.current?.stop();
-        } catch (e) {}
+        } catch (e) { }
         setTimeout(() => {
           try {
             recognitionRef.current?.start();
@@ -725,7 +786,7 @@ export default function VoiceOrb({
     }
 
     // Format conversation history for Gemini context (last 10 turns)
-    const history = (chatLogs || [])
+    const history = (chatLogsRef.current || [])
       .filter(log => log.text && log.text.trim() !== '')
       .slice(-10)
       .map(log => ({
@@ -740,7 +801,7 @@ export default function VoiceOrb({
         body: JSON.stringify({
           message: finalMessage,
           mode,
-          cartItems,
+          cartItems: cartItemsRef.current,
           history,
         }),
       });
@@ -765,7 +826,7 @@ export default function VoiceOrb({
         }
       } else if (data.action) {
         onActionTriggered(data.action.type, data.action.payload);
-        
+
         if (data.action.type === 'ASK_KASBON_NAME') {
           setWaitingForKasbonName(true);
         }
@@ -792,7 +853,7 @@ export default function VoiceOrb({
 
   const speakResponse = async (text: string) => {
     addDebugLog(`speakResponse: "${text.substring(0, 20)}..."`);
-    
+
     // Clean up previous event listeners, audios, and timeouts
     stopAllAudio();
 
@@ -816,11 +877,15 @@ export default function VoiceOrb({
 
     try {
       await playAudioChunks(chunks);
-      
+
       // Finished speaking successfully
       setState('idle');
       isPlayingAudioRef.current = false;
       
+      if (onSpeakingFinished) {
+        onSpeakingFinished(cleanText);
+      }
+
       // Auto-restart listening if 2-way mode is active
       if (isTwoWayModeRef.current && !isDeactivationResponse) {
         setTimeout(() => {
@@ -841,16 +906,16 @@ export default function VoiceOrb({
     }
 
     const utterance = new SpeechSynthesisUtterance(text);
-    
+
     // Choose voice dynamically with robust fallbacks prioritizing Indonesian
     const voices = window.speechSynthesis.getVoices();
-    
+
     // 1. Try exact match for Indonesian (id-ID)
     let selectedVoice = voices.find(v => {
       const l = v.lang.toLowerCase().replace('_', '-');
       return l === 'id-id';
     });
-    
+
     // 2. Try any language code starting with 'id'
     if (!selectedVoice) {
       selectedVoice = voices.find(v => {
@@ -905,7 +970,7 @@ export default function VoiceOrb({
         safetyTimeoutRef.current = null;
       }
       activeUtteranceRef.current = null;
-      
+
       const idx = activeUtterances.indexOf(utterance);
       if (idx > -1) {
         activeUtterances.splice(idx, 1);
@@ -915,6 +980,9 @@ export default function VoiceOrb({
     safetyTimeoutRef.current = setTimeout(() => {
       addDebugLog('fallback safety timeout triggered!');
       cleanupAndIdle();
+      if (onSpeakingFinished) {
+        onSpeakingFinished(text);
+      }
       if (isTwoWayModeRef.current && !isDeactivationResponse) {
         startListeningAutomatically();
       }
@@ -926,6 +994,9 @@ export default function VoiceOrb({
 
     utterance.onend = () => {
       cleanupAndIdle();
+      if (onSpeakingFinished) {
+        onSpeakingFinished(text);
+      }
       if (isTwoWayModeRef.current && !isDeactivationResponse) {
         setTimeout(() => {
           startListeningAutomatically();
@@ -1095,17 +1166,17 @@ export default function VoiceOrb({
           {state === 'listening' && <Mic className="w-14 h-14 text-white animate-pulse" />}
           {state === 'thinking' && <Sparkles className="w-14 h-14 text-white animate-pulse" />}
           {state === 'speaking' && <Volume2 className="w-14 h-14 text-white" />}
-          
+
           <span className="absolute bottom-8 text-[10px] text-white/95 font-black uppercase tracking-wider text-center px-4 w-full">
-            {state === 'idle' 
-              ? 'Mulai Bicara' 
-              : state === 'listening' 
-              ? 'Mendengarkan' 
-              : state === 'thinking' 
-              ? 'Berpikir' 
-              : state === 'speaking' 
-              ? 'Berbicara' 
-              : state}
+            {state === 'idle'
+              ? 'Mulai Bicara'
+              : state === 'listening'
+                ? 'Mendengarkan'
+                : state === 'thinking'
+                  ? 'Berpikir'
+                  : state === 'speaking'
+                    ? 'Berbicara'
+                    : state}
           </span>
         </button>
       </div>

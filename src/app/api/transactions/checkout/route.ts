@@ -29,9 +29,19 @@ export async function POST(req: Request) {
           let transTotal = 0;
 
           for (const item of items) {
-            const product = await tx.product.findUnique({
+            let product = await tx.product.findUnique({
               where: { sku: item.sku }
             });
+            if (!product && item.sku) {
+              product = await tx.product.findUnique({
+                where: { sku: item.sku.toUpperCase() }
+              });
+            }
+            if (!product && item.sku) {
+              product = await tx.product.findUnique({
+                where: { sku: item.sku.toLowerCase() }
+              });
+            }
             
             if (!product) {
               throw new Error(`Product with SKU ${item.sku} not found`);
@@ -125,9 +135,13 @@ export async function POST(req: Request) {
     }
 
     for (const item of items) {
-      const product = await prisma.product.findUnique({
-        where: { sku: item.sku }
-      });
+      let product = await prisma.product.findUnique({ where: { sku: item.sku } });
+      if (!product && item.sku) {
+        product = await prisma.product.findUnique({ where: { sku: item.sku.toUpperCase() } });
+      }
+      if (!product && item.sku) {
+        product = await prisma.product.findUnique({ where: { sku: item.sku.toLowerCase() } });
+      }
       
       if (!product) {
         return NextResponse.json({ error: `Product with SKU ${item.sku} not found` }, { status: 404 });
