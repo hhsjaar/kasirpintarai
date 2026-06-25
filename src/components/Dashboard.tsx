@@ -107,6 +107,7 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
   }
   const [kasbons, setKasbons] = useState<KasbonItem[]>([]);
   const [activeTab, setActiveTab] = useState<'analytics' | 'inventory' | 'kasbon'>('analytics');
+  const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
 
   // VAPID Web Push subscription states
   const [isSubscribed, setIsSubscribed] = useState<boolean>(false);
@@ -574,7 +575,7 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
           <div className="glass-panel p-5 rounded-2xl space-y-4 bg-white border border-slate-150">
             <div>
               <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">Histori Transaksi Toko & Midtrans</h3>
-              <p className="text-slate-500 text-xs mt-0.5">Daftar transaksi kasir. Anda bisa menyetujui pembayaran secara simulasi untuk pengujian lokal.</p>
+              <p className="text-slate-500 text-xs mt-0.5">Daftar transaksi kasir. Klik pada baris transaksi untuk melihat detail produk yang dibeli. Anda bisa menyetujui pembayaran secara simulasi untuk pengujian lokal.</p>
             </div>
 
             <div className="overflow-x-auto">
@@ -596,7 +597,12 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
                     </tr>
                   ) : (
                     transactions.map((txn) => (
-                      <tr key={txn.id} className="hover:bg-slate-50/50 transition text-slate-600">
+                      <tr 
+                        key={txn.id} 
+                        onClick={() => setSelectedTransaction(txn)}
+                        className="hover:bg-slate-50/70 transition text-slate-600 cursor-pointer"
+                        title="Klik untuk melihat detail produk yang dibeli"
+                      >
                         <td className="py-3.5 px-4 font-mono font-bold text-slate-800 text-xs">{txn.invoiceNumber}</td>
                         <td className="py-3.5 px-4 text-xs">
                           {new Date(txn.createdAt).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })}
@@ -618,7 +624,7 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
                             </span>
                           )}
                         </td>
-                        <td className="py-3.5 px-4 text-center">
+                        <td className="py-3.5 px-4 text-center" onClick={(e) => e.stopPropagation()}>
                           {txn.paymentStatus === 'PENDING' && txn.paymentType !== 'KASBON' ? (
                             <button
                               onClick={() => handleSimulateWebhook(txn.invoiceNumber)}
@@ -816,8 +822,14 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
                         <td className="py-3.5 px-4 text-xs">
                           {new Date(k.createdAt).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })}
                         </td>
-                        <td className="py-3.5 px-4 text-xs max-w-xs truncate">
-                          {k.transaction?.items.map(it => `${it.product?.name} (${it.quantity}x)`).join(', ') || '-'}
+                        <td className="py-3.5 px-4 text-xs">
+                          <div className="flex flex-wrap gap-1 max-w-xs">
+                            {k.transaction?.items.map((it, idx) => (
+                              <span key={idx} className="bg-slate-50 border border-slate-200/50 rounded-lg px-2 py-0.5 inline-block text-[10px] font-medium text-slate-700 shadow-sm whitespace-nowrap">
+                                {it.product?.name || 'Produk'} <span className="text-emerald-600 font-bold">({it.quantity}x)</span>
+                              </span>
+                            )) || <span className="text-slate-400 font-mono">-</span>}
+                          </div>
                         </td>
                         <td className="py-3.5 px-4 font-semibold text-slate-800">Rp {k.amount.toLocaleString('id-ID')}</td>
                         <td className="py-3.5 px-4">
@@ -936,6 +948,95 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
                 Simpan Produk
               </button>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* Transaction Detail Modal */}
+      {selectedTransaction && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/40 backdrop-blur-sm p-4 animate-fade-in">
+          <div className="w-full max-w-lg bg-white border border-slate-200 rounded-3xl p-6 shadow-2xl space-y-5 text-left">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div>
+                <h3 className="text-base font-bold text-slate-800">Detail Transaksi</h3>
+                <span className="text-xs text-slate-400 font-mono">{selectedTransaction.invoiceNumber}</span>
+              </div>
+              <button
+                onClick={() => setSelectedTransaction(null)}
+                className="text-slate-400 hover:text-slate-650 text-xs font-semibold cursor-pointer border border-slate-200 hover:bg-slate-50 px-3 py-1 rounded-xl transition"
+              >
+                Tutup
+              </button>
+            </div>
+            
+            <div className="space-y-4 text-sm">
+              <div className="grid grid-cols-2 gap-4 text-xs bg-slate-50 p-4 rounded-2xl border border-slate-200/50">
+                <div>
+                  <span className="text-slate-400 uppercase tracking-wider block font-bold text-[10px]">Waktu</span>
+                  <span className="text-slate-700 font-bold mt-0.5 block">
+                    {new Date(selectedTransaction.createdAt).toLocaleString('id-ID', { dateStyle: 'long', timeStyle: 'short' })}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 uppercase tracking-wider block font-bold text-[10px]">Metode Pembayaran</span>
+                  <span className="mt-0.5 inline-block px-2.5 py-0.5 bg-emerald-50 text-emerald-700 border border-emerald-150/30 rounded text-3xs font-black uppercase">
+                    {selectedTransaction.paymentType || 'MIDTRANS'}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 uppercase tracking-wider block font-bold text-[10px]">Status</span>
+                  <span className="mt-0.5 block">
+                    {selectedTransaction.paymentStatus === 'PAID' ? (
+                      <span className="inline-block px-2.5 py-0.5 rounded-full text-3xs font-black bg-emerald-50 text-emerald-600 uppercase border border-emerald-150/20">
+                        Lunas
+                      </span>
+                    ) : selectedTransaction.paymentStatus === 'FAILED' ? (
+                      <span className="inline-block px-2.5 py-0.5 rounded-full text-3xs font-black bg-red-50 text-red-600 uppercase border border-red-150/20">
+                        Gagal
+                      </span>
+                    ) : (
+                      <span className="inline-block px-2.5 py-0.5 rounded-full text-3xs font-black bg-amber-50 text-amber-600 uppercase border border-amber-150/20 animate-pulse">
+                        Pending
+                      </span>
+                    )}
+                  </span>
+                </div>
+                <div>
+                  <span className="text-slate-400 uppercase tracking-wider block font-bold text-[10px]">Total Belanja</span>
+                  <span className="text-slate-900 font-extrabold mt-0.5 block text-sm">
+                    Rp {selectedTransaction.totalAmount.toLocaleString('id-ID')}
+                  </span>
+                </div>
+              </div>
+
+              <div>
+                <h4 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-2">Produk Yang Dibeli</h4>
+                <div className="border border-slate-200/60 rounded-2xl overflow-hidden shadow-sm shadow-slate-50">
+                  <table className="w-full text-xs text-left border-collapse">
+                    <thead>
+                      <tr className="bg-slate-50 border-b border-slate-200/60 text-slate-500 font-bold uppercase text-[9px]">
+                        <th className="py-2.5 px-3.5">Nama Produk</th>
+                        <th className="py-2.5 px-3.5 text-center">Jumlah</th>
+                        <th className="py-2.5 px-3.5 text-right">Harga Satuan</th>
+                        <th className="py-2.5 px-3.5 text-right">Subtotal</th>
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-slate-100 text-slate-650">
+                      {selectedTransaction.items?.map((item, idx) => (
+                        <tr key={idx} className="hover:bg-slate-50/30">
+                          <td className="py-2.5 px-3.5 font-bold text-slate-800">{item.product?.name || 'Produk Tidak Dikenal'}</td>
+                          <td className="py-2.5 px-3.5 text-center font-bold text-slate-600">{item.quantity}x</td>
+                          <td className="py-2.5 px-3.5 text-right font-medium">Rp {item.priceAtPurchase.toLocaleString('id-ID')}</td>
+                          <td className="py-2.5 px-3.5 text-right font-bold text-slate-800">
+                            Rp {(item.quantity * item.priceAtPurchase).toLocaleString('id-ID')}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
           </div>
         </div>
       )}

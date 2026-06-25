@@ -90,6 +90,81 @@ const preprocessTextForTTS = (text: string): string => {
   return processed.replace(/\s+/g, ' ').replace(/\s+([.,!?])/g, '$1').trim();
 };
 
+function filterSpeechTranscript(text: string, allowedProducts: Set<string>): string {
+  if (!text) return '';
+  const words = text.split(/\s+/);
+  const filteredWords: string[] = [];
+  
+  const baseAllowed = new Set([
+    // Greetings & Politeness
+    'selamat', 'datang', 'pagi', 'siang', 'sore', 'malam', 'halo', 'hai', 'permisi',
+    'kak', 'kakak', 'bang', 'mbak', 'mas', 'de', 'dek',
+    // Pronouns
+    'saya', 'kami', 'kita', 'aku',
+    // Buying verbs & intents
+    'beli', 'pesan', 'tambah', 'order', 'ambil', 'minta', 'tolong', 'ingin', 'mau', 'pengen', 'butuh',
+    // Modifying/Canceling verbs
+    'kurang', 'hapus', 'batal', 'cancel', 'kurangi', 'hilangkan', 'kembali',
+    // Cart & Checkout
+    'keranjang', 'checkout', 'bayar', 'lunas', 'total', 'harga', 'berapa',
+    'kasbon', 'hutang', 'utang', 'qris', 'midtrans', 'transfer', 'cash', 'tunai',
+    'nanti', 'sekarang', 'catat', 'simpan',
+    // Catalog queries & question words
+    'produk', 'barang', 'daftar', 'menu', 'etalase', 'lihat', 'cari', 'stok',
+    'ada', 'apa', 'apakah', 'saja', 'aja', 'mana', 'dimana', 'bagaimana',
+    // Coordinating conjunctions & prepositions
+    'dan', 'sama', 'dengan', 'atau', 'terus', 'lalu', 'kemudian', 'untuk', 'atas', 'nama',
+    // Affirmations / Confirmations
+    'cukup', 'sudah', 'selesai', 'oke', 'ok', 'okedeh', 'baik', 'siap', 'setuju', 'konfirmasi', 'ya', 'iya', 'yes', 'sukses',
+    // Quantities / Numbers
+    'satu', 'dua', 'tiga', 'empat', 'lima', 'enam', 'tujuh', 'delapan', 'sembilan', 'sepuluh',
+    'sebelas', 'belas', 'puluh', 'ratus', 'ribu', 'rupiah', 'rp'
+  ]);
+
+  const roots = [
+    'beli', 'pesan', 'tambah', 'order', 'ambil', 'kurang', 'hapus', 'batal', 'checkout',
+    'bayar', 'lunas', 'harga', 'kasbon', 'hutang', 'utang', 'qris', 'transfer', 'tunai',
+    'catat', 'cukup', 'selesai', 'barang', 'produk'
+  ];
+
+  words.forEach((w) => {
+    const cleanWord = w.toLowerCase().replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+    if (!cleanWord) return;
+    
+    const isDigit = /^\d+$/.test(cleanWord);
+    if (isDigit) {
+      filteredWords.push(w);
+      return;
+    }
+
+    if (baseAllowed.has(cleanWord)) {
+      filteredWords.push(w);
+      return;
+    }
+
+    if (allowedProducts.has(cleanWord)) {
+      filteredWords.push(w);
+      return;
+    }
+
+    for (const prodWord of allowedProducts) {
+      if (cleanWord.includes(prodWord)) {
+        filteredWords.push(w);
+        return;
+      }
+    }
+
+    for (const root of roots) {
+      if (cleanWord.includes(root)) {
+        filteredWords.push(w);
+        return;
+      }
+    }
+  });
+
+  return filteredWords.join(' ');
+}
+
 interface VoiceOrbProps {
   mode: 'customer' | 'owner';
   cartItems: Array<{ sku: string; quantity: number }>;
@@ -122,9 +197,33 @@ export default function VoiceOrb({
   const [isTwoWayMode, setIsTwoWayMode] = useState<boolean>(true);
   const [isMounted, setIsMounted] = useState<boolean>(false);
   const [waitingForKasbonName, setWaitingForKasbonName] = useState<boolean>(false);
+  const [allowedProductWords, setAllowedProductWords] = useState<Set<string>>(new Set());
 
   useEffect(() => {
     setIsMounted(true);
+    const fetchProducts = async () => {
+      try {
+        const res = await fetch('/api/products');
+        if (res.ok) {
+          const data = await res.json();
+          const words = new Set<string>();
+          data.forEach((p: any) => {
+            p.name.toLowerCase().split(/\s+/).forEach((w: string) => {
+              const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+              if (clean) words.add(clean);
+            });
+            p.sku.toLowerCase().split(/\s+/).forEach((w: string) => {
+              const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g,"");
+              if (clean) words.add(clean);
+            });
+          });
+          setAllowedProductWords(words);
+        }
+      } catch (err) {
+        console.error('Failed to fetch product names for speech filtering:', err);
+      }
+    };
+    fetchProducts();
   }, []);
   
   const addDebugLog = (msg: string) => {
@@ -148,10 +247,15 @@ export default function VoiceOrb({
   const isTwoWayModeRef = useRef<boolean>(true);
   const stateRef = useRef<OrbState>('idle');
   const waitingForKasbonNameRef = useRef<boolean>(false);
+  const allowedProductWordsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     waitingForKasbonNameRef.current = waitingForKasbonName;
   }, [waitingForKasbonName]);
+
+  useEffect(() => {
+    allowedProductWordsRef.current = allowedProductWords;
+  }, [allowedProductWords]);
 
   // Sync processSpeechInput and dynamic states with their refs on every render
   useEffect(() => {
@@ -281,7 +385,7 @@ export default function VoiceOrb({
     }
 
     const rec = new SpeechRecognition();
-    rec.continuous = false;
+    rec.continuous = true;
     rec.interimResults = true;
     rec.lang = 'id-ID'; // Indonesian Language Support
 
@@ -295,26 +399,30 @@ export default function VoiceOrb({
     };
 
     rec.onresult = (event: any) => {
-      let interim = '';
-      let final = '';
+      let cumulativeFinal = '';
+      let currentInterim = '';
 
-      for (let i = event.resultIndex; i < event.results.length; ++i) {
+      for (let i = 0; i < event.results.length; ++i) {
         if (event.results[i].isFinal) {
-          final += event.results[i][0].transcript;
+          cumulativeFinal += event.results[i][0].transcript + ' ';
         } else {
-          interim += event.results[i][0].transcript;
+          currentInterim += event.results[i][0].transcript;
         }
       }
 
-      if (interim) {
-        setInterimTranscript(interim);
-        interimTranscriptRef.current = interim;
-      }
-      if (final) {
-        setFinalTranscript(final);
-        finalTranscriptRef.current = final;
-        setInterimTranscript('');
-        interimTranscriptRef.current = '';
+      setInterimTranscript(currentInterim);
+      interimTranscriptRef.current = currentInterim;
+      
+      setFinalTranscript(cumulativeFinal.trim());
+      finalTranscriptRef.current = cumulativeFinal.trim();
+
+      // Check for 'cukup' keyword to stop recording
+      const checkText = (cumulativeFinal + ' ' + currentInterim).toLowerCase();
+      if (checkText.includes('cukup')) {
+        addDebugLog('Detected "cukup" trigger! Stopping speech recognition...');
+        try {
+          recognitionRef.current?.stop();
+        } catch (e) {}
       }
     };
 
@@ -336,13 +444,26 @@ export default function VoiceOrb({
     rec.onend = () => {
       isListeningRef.current = false;
       
-      const textToProcess = finalTranscriptRef.current || interimTranscriptRef.current;
-      if (textToProcess && textToProcess.trim()) {
+      const rawText = (finalTranscriptRef.current + ' ' + interimTranscriptRef.current).trim();
+      
+      // Clear transcript states for next session
+      setInterimTranscript('');
+      setFinalTranscript('');
+      finalTranscriptRef.current = '';
+      interimTranscriptRef.current = '';
+
+      if (rawText) {
         silenceCountRef.current = 0; // Reset silence counter on valid input
         
+        // Strip the word "cukup" (and some variations/symbols)
+        let cleanRaw = rawText.replace(/\b(cukup|sudah cukup)\b/gi, '').trim();
+        
+        // Normalize "kris" and "keris" pronunciation variants to standard "qris"
+        cleanRaw = cleanRaw.replace(/\b(kris|keris)\b/gi, 'qris');
+        
         // Handle stop/cancel keywords locally to disable 2-way mode smoothly
-        const query = textToProcess.toLowerCase().trim();
-        const stopKeywords = ['stop', 'cukup', 'selesai', 'matikan', 'nonaktifkan', 'batal', 'cancel'];
+        const query = cleanRaw.toLowerCase();
+        const stopKeywords = ['stop', 'matikan', 'nonaktifkan', 'batal', 'cancel'];
         const isStopCommand = stopKeywords.some(keyword => query === keyword || query.startsWith(keyword + ' ') || query.endsWith(' ' + keyword));
         
         if (isStopCommand) {
@@ -352,8 +473,27 @@ export default function VoiceOrb({
           return;
         }
 
-        if (processSpeechInputRef.current) {
-          processSpeechInputRef.current(textToProcess);
+        // Apply product-aware and grammar keyword filter!
+        // If we are waiting for a Kasbon name, we bypass the filter to avoid discarding the user's name.
+        const filteredText = waitingForKasbonNameRef.current 
+          ? cleanRaw 
+          : filterSpeechTranscript(cleanRaw, allowedProductWordsRef.current);
+        addDebugLog(`Raw speech: "${rawText}" -> Filtered speech: "${filteredText}"`);
+
+        if (filteredText.trim()) {
+          if (processSpeechInputRef.current) {
+            processSpeechInputRef.current(filteredText);
+          }
+        } else {
+          // If the filtered text is empty (trash input/background noise), restart automatically if in 2-way mode
+          if (isTwoWayModeRef.current) {
+            setState('idle');
+            setTimeout(() => {
+              startListeningAutomatically();
+            }, 400);
+          } else {
+            setState('idle');
+          }
         }
       } else {
         // Handle silence - automatically restart recognition for continuous loop if two-way mode is active
@@ -614,7 +754,16 @@ export default function VoiceOrb({
       onTranscriptReceived(text, data.response, data.products);
 
       // Execute client-side action if any
-      if (data.action) {
+      if (data.actions && Array.isArray(data.actions)) {
+        for (const action of data.actions) {
+          if (action) {
+            onActionTriggered(action.type, action.payload);
+            if (action.type === 'ASK_KASBON_NAME') {
+              setWaitingForKasbonName(true);
+            }
+          }
+        }
+      } else if (data.action) {
         onActionTriggered(data.action.type, data.action.payload);
         
         if (data.action.type === 'ASK_KASBON_NAME') {

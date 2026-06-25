@@ -445,88 +445,105 @@ async function handleMockAI(
         enam: 6, tujuh: 7, delapan: 8, sembilan: 9, sepuluh: 10
       };
       
-      let quantity = 1;
-      let cleanedQuery = query;
+      const allProds = await prisma.product.findMany({});
+      const sortedProds = [...allProds].sort((a, b) => b.name.length - a.name.length);
       
-      // Parse Indonesian words for quantity
-      const words = cleanedQuery.split(/\s+/);
-      for (const word of words) {
-        if (idNumMap[word.toLowerCase()]) {
-          quantity = idNumMap[word.toLowerCase()];
-          cleanedQuery = cleanedQuery.replace(new RegExp(`\\b${word}\\b`, 'gi'), '');
-        }
-      }
+      const addedItems: { product: any; quantity: number }[] = [];
+      const outOfStockItems: string[] = [];
       
-      // Parse digits for quantity
-      const numMatch = cleanedQuery.match(/\b(\d+)\b/);
-      if (numMatch) {
-        quantity = parseInt(numMatch[1]);
-        cleanedQuery = cleanedQuery.replace(/\b\d+\b/g, '');
-      }
+      let tempQuery = query;
       
-      // Extract clean product keyword
-      let productKeyword = cleanedQuery
-        .replace(/(?:beli|pesan|tambah|order|ambil)/gi, '')
-        .trim();
-      
-      // Resolve contextual reference from history if keyword is missing/generic
-      const genericKeywords = ['itu', 'ke keranjang', 'keranjang', 'oke', 'masukkan', 'tambahkan', 'dong', 'ke', 'ini'];
-      if ((!productKeyword || productKeyword.length < 3 || genericKeywords.includes(productKeyword)) && history && history.length > 0) {
-        const allProds = await prisma.product.findMany({});
-        // Scan history from most recent to oldest
-        for (let i = history.length - 1; i >= 0; i--) {
-          const histText = history[i].parts?.[0]?.text?.toLowerCase() || '';
-          const found = allProds.find(p => histText.includes(p.name.toLowerCase()) || histText.includes(p.sku.toLowerCase()));
-          if (found) {
-            productKeyword = found.name.toLowerCase();
-            break;
-          }
-        }
-      }
+      for (const prod of sortedProds) {
+        const prodNameLower = prod.name.toLowerCase();
+        const prodSkuLower = prod.sku.toLowerCase();
+        const nameKeywords = prodNameLower.split(/\s+/).filter(k => k.length > 2);
+        const firstKeyword = nameKeywords[0] || prodNameLower;
         
-      if (productKeyword && productKeyword.length >= 2) {
-        // Search db
-        const dbProduct = await prisma.product.findFirst({
-          where: {
-            name: { contains: productKeyword, mode: 'insensitive' }
-          }
-        });
-
-        if (dbProduct) {
-          if (dbProduct.stock < quantity) {
-            return NextResponse.json({
-              response: `Maaf, stok ${dbProduct.name} tidak cukup. Stok yang tersedia hanya ${dbProduct.stock}.`,
-              speakText: `Maaf, stok tidak cukup.`,
-              action: null,
-              isMock: true
-            });
-          }
-
-          return NextResponse.json({
-            response: `Berhasil menambahkan ${quantity} ${dbProduct.name} (Rp ${(dbProduct.price * quantity).toLocaleString('id-ID')}) ke keranjang belanja.`,
-            speakText: `Berhasil menambahkan ${quantity} ${dbProduct.name} ke keranjang.`,
-            action: {
-              type: 'ADD_TO_CART',
-              payload: {
-                product: dbProduct,
-                quantity
-              }
-            },
-            products: [dbProduct],
-            isMock: true
-          });
+        let foundIndex = tempQuery.indexOf(prodNameLower);
+        let matchedLen = prodNameLower.length;
+        
+        if (foundIndex === -1) {
+          foundIndex = tempQuery.indexOf(prodSkuLower);
+          matchedLen = prodSkuLower.length;
         }
+        
+        if (foundIndex === -1 && firstKeyword && firstKeyword.length > 2) {
+          foundIndex = tempQuery.indexOf(firstKeyword);
+          matchedLen = firstKeyword.length;
+        }
+        
+        if (foundIndex !== -1) {
+          const beforeSub = tempQuery.substring(Math.max(0, foundIndex - 15), foundIndex).trim();
+          const afterSub = tempQuery.substring(foundIndex + matchedLen, Math.min(tempQuery.length, foundIndex + matchedLen + 15)).trim();
+          
+          let quantity = 1;
+          
+          const digitMatchBefore = beforeSub.match(/(\d+)\s*$/);
+          const digitMatchAfter = afterSub.match(/^\s*(\d+)/);
+          
+          if (digitMatchBefore) {
+            quantity = parseInt(digitMatchBefore[1]);
+          } else if (digitMatchAfter) {
+            quantity = parseInt(digitMatchAfter[1]);
+          } else {
+            const wordsBefore = beforeSub.split(/\s+/);
+            const lastWordBefore = wordsBefore[wordsBefore.length - 1]?.toLowerCase();
+            if (idNumMap[lastWordBefore]) {
+              quantity = idNumMap[lastWordBefore];
+            } else {
+              const wordsAfter = afterSub.split(/\s+/);
+              const firstWordAfter = wordsAfter[0]?.toLowerCase();
+              if (idNumMap[firstWordAfter]) {
+                quantity = idNumMap[firstWordAfter];
+              }
+            }
+          }
+          
+          if (prod.stock < quantity) {
+            outOfStockItems.push(`${prod.name} (Stok: ${prod.stock}, Diminta: ${quantity})`);
+          } else {
+            addedItems.push({ product: prod, quantity });
+          }
+          
+          tempQuery = tempQuery.substring(0, foundIndex) + " ".repeat(matchedLen) + tempQuery.substring(foundIndex + matchedLen);
+        }
+      }
+      
+      if (addedItems.length > 0) {
+        const actions = addedItems.map(item => ({
+          type: 'ADD_TO_CART',
+          payload: { product: item.product, quantity: item.quantity }
+        }));
+        
+        const responseText = `Berhasil menambahkan ke keranjang: ${addedItems.map(item => `${item.quantity}x ${item.product.name}`).join(', ')}.` + 
+          (outOfStockItems.length > 0 ? ` Maaf, beberapa barang tidak cukup stok: ${outOfStockItems.join(', ')}.` : '');
+          
+        const speakText = `Berhasil menambahkan ${addedItems.map(item => `${item.quantity} ${item.product.name}`).join(' dan ')} ke keranjang.` +
+          (outOfStockItems.length > 0 ? ` Maaf, beberapa barang stoknya tidak cukup.` : '');
+          
+        return NextResponse.json({
+          response: responseText,
+          speakText,
+          action: actions[0], // backward compatibility
+          actions,
+          products: addedItems.map(item => item.product),
+          isMock: true
+        });
+      } else if (outOfStockItems.length > 0) {
+        return NextResponse.json({
+          response: `Maaf, stok tidak mencukupi untuk barang yang Anda minta: ${outOfStockItems.join(', ')}.`,
+          speakText: `Maaf, stok tidak mencukupi.`,
+          action: null,
+          isMock: true
+        });
       }
     }
 
     // Check for general product listing query
     if (query.includes('ada barang apa') || query.includes('produk apa') || query.includes('semua produk') || query.includes('daftar barang') || query.includes('barang apa aja') || query.includes('daftar produk')) {
-      const allProducts = await prisma.product.findMany({});
-      const listStr = allProducts.map(p => `- ${p.name} (SKU: ${p.sku}): Rp ${p.price.toLocaleString('id-ID')} (Stok: ${p.stock})`).join('\n');
-      const speakStr = `Kami memiliki ${allProducts.map(p => p.name).join(', ')}. Mau beli yang mana?`;
       return NextResponse.json({
-        response: `Berikut adalah daftar produk yang tersedia di toko kami:\n${listStr}`,
-        speakText: speakStr,
+        response: 'Kakak bisa langsung mengecek seluruh daftar produk lengkap beserta harganya di etalase menu atau layar POS yang tersedia ya. Ada yang bisa saya bantu untuk dimasukkan ke keranjang?',
+        speakText: 'Kakak bisa langsung mengecek daftar produk lengkap di etalase menu ya. Ada yang bisa saya bantu masukkan ke keranjang?',
         action: null,
         isMock: true
       });
@@ -772,14 +789,15 @@ async function handleRealGeminiAI(
     - PENTING: Tulis singkatan "AI" tetap sebagai "AI" di teks balasan chat window (JANGAN ditulis sebagai "e ai" atau "e-ai"). Mesin suara client secara otomatis akan melafalkannya sebagai "e-ai" secara dinamis.
     
     DILARANG menggunakan kosakata bahasa Melayu Malaysia seperti "sila" (gunakan "silakan"), "kedai" (gunakan "toko"), "senarai" (gunakan "daftar"), "pemilik" (gunakan "owner"), atau kosakata Melayu lainnya yang tidak lazim di Indonesia.
-    
-    ATURAN CUSTOMER MODE:
+      ATURAN CUSTOMER MODE:
+    - PENTING: Anda dapat memanggil fungsi/alat (tools) beberapa kali secara paralel (parallel function calling) jika pelanggan meminta beberapa tindakan sekaligus. Contohnya, jika pelanggan berkata "beli 1 indomie goreng dan 3 aqua", Anda HARUS memanggil \`getCartAction\` sebanyak 2 kali secara paralel: satu untuk 'indomie goreng' dengan quantity: 1, dan satu lagi untuk 'aqua' dengan quantity: 3. Jangan hanya memanggil salah satu saja!
     - PENTING: Ketika pelanggan menyatakan ingin membeli, memesan, atau menambahkan barang ke keranjang (misalnya: "beli indomie", "tambah aqua", "ambil chitato", "tambah teh botol", "saya mau kopi"), Anda HARUS langsung memanggil 'getCartAction' dengan aksi 'ADD' dan mengirimkan kata kunci barang tersebut (misal: "indomie", "aqua", "chitato", "teh botol") ke parameter 'skuOrName'. JANGAN memanggil 'searchProducts' terlebih dahulu karena backend kami memiliki pencocokan nama otomatis yang sangat cerdas di database.
     - PENTING: JANGAN PERNAH hanya menjawab atau menawarkan produk di teks chat tanpa memanggil 'getCartAction' jika pelanggan berniat membeli atau memasukkannya ke keranjang. Panggil 'searchProducts' HANYA jika mereka sekadar bertanya ketersediaan/harga produk tanpa ada indikasi membeli.
+    - PENTING: Jika pelanggan bertanya tentang daftar produk yang ada (misal: "produknya apa saja?", "ada barang apa saja?", "lihat daftarnya dong"), JANGAN menyebutkan atau mendaftar seluruh produk tersebut satu per satu karena akan memakan waktu lama. Sebaliknya, jawablah dengan ramah dan katakan bahwa semua produk yang tersedia dapat dilihat secara langsung di etalase menu atau layar POS.
     - KELOLA KONTEKS: Jika pelanggan memerintahkan tindakan secara implisit atau merujuk ke produk dari riwayat percakapan sebelumnya (misalnya, mereka bertanya "berapa harga aqua botol?" lalu berkata "oke tambahkan ke keranjang" atau "beli itu"), Anda HARUS melacak nama produk terakhir yang dibahas dari percakapan sebelumnya (misalnya: "aqua botol") dan mengirimkannya sebagai parameter 'skuOrName' ke 'getCartAction' dengan aksi 'ADD'. Jangan bertanya ulang produk apa yang ingin dibeli jika produk tersebut jelas dari konteks percakapan di atas.
     - Panggil 'getCartAction' dengan aksi 'REMOVE' jika pelanggan ingin menghapus produk dari keranjang.
     - Panggil 'getCartAction' dengan aksi 'CLEAR' jika pelanggan ingin mengosongkan keranjang.
-    - Hanya panggil 'searchProducts' jika pelanggan sekadar bertanya tentang keberadaan produk, mencari barang, atau bertanya harga produk tanpa berniat membelinya secara langsung (misal: "apakah ada indomie?", "berapa harga aqua?", "cari produk susu").
+    - Hanya panggil 'searchProducts' jika pelanggan sekadar bertanya tentang keberadaan produk, mencari barang, atau bertanya harga produk tanpa berniat membelinya secara langsung (misal: "apakah ada indomie?", "berapa harga aqua?", "cari produk susu").").
     
     ATURAN CHECKOUT / BAYAR:
     - PENTING: Ketika pelanggan menyatakan ingin membayar, checkout, atau sudah selesai belanja (misal: "checkout dong", "saya mau bayar", "sudah selesai belanja"), Anda JANGAN langsung memanggil 'checkoutCart' kecuali mereka menyebutkan metode pembayaran secara spesifik (seperti QRIS atau Kasbon). Tanyakan terlebih dahulu kepada pelanggan: *"Mau dibayar langsung menggunakan QRIS atau dicatat sebagai Kasbon dulu nih, Kak? 😊"*.
@@ -917,9 +935,34 @@ async function handleRealGeminiAI(
     }
   ];
 
+  // Sanitize history to satisfy Gemini API requirements:
+  // 1. Must start with role: 'user'
+  // 2. Roles must alternate between 'user' and 'model'
+  // 3. Must end with role: 'model' (since the next turn is 'user' via sendMessage)
+  let sanitizedHistory = [];
+  if (history && Array.isArray(history)) {
+    let expectUser = true;
+    for (const h of history) {
+      if (expectUser) {
+        if (h.role === 'user') {
+          sanitizedHistory.push(h);
+          expectUser = false;
+        }
+      } else {
+        if (h.role === 'model') {
+          sanitizedHistory.push(h);
+          expectUser = true;
+        }
+      }
+    }
+    if (sanitizedHistory.length > 0 && sanitizedHistory[sanitizedHistory.length - 1].role === 'user') {
+      sanitizedHistory.pop();
+    }
+  }
+
   // Start chat with tools and conversational history
   const chat = model.startChat({
-    history: history,
+    history: sanitizedHistory,
     tools: tools,
     generationConfig: {
       temperature: 0.2
@@ -931,13 +974,16 @@ async function handleRealGeminiAI(
   const functionCalls = response.functionCalls();
 
   if (functionCalls && functionCalls.length > 0) {
-    const call = functionCalls[0];
-    const funcName = call.name;
-    const args = call.args as any;
-
-    let toolResult: any = null;
-    let clientAction: any = null;
+    const clientActions: any[] = [];
+    const toolResults: any[] = [];
     let productsMetadata: any[] = [];
+
+    for (const call of functionCalls) {
+      const funcName = call.name;
+      const args = call.args as any;
+
+      let toolResult: any = null;
+      let clientAction: any = null;
 
     // Execute functions
     if (funcName === 'searchProducts') {
@@ -989,7 +1035,7 @@ async function handleRealGeminiAI(
         }
       }
       toolResult = { products };
-      productsMetadata = products;
+      productsMetadata = [...productsMetadata, ...products];
     } 
     
     else if (funcName === 'getCartAction') {
@@ -1368,21 +1414,28 @@ async function handleRealGeminiAI(
       clientAction = { type: 'REFRESH_METRICS', payload: null };
     }
 
-    // Send tool result back to Gemini to get conversational text
-    const followUp = await chat.sendMessage([
-      {
-        functionResponse: {
-          name: funcName,
-          response: { result: toolResult }
-        }
+      toolResults.push(toolResult);
+      if (clientAction) {
+        clientActions.push(clientAction);
       }
-    ]);
+    }
+
+    // Send tool result back to Gemini to get conversational text
+    const followUpParts = functionCalls.map((call, idx) => ({
+      functionResponse: {
+        name: call.name,
+        response: { result: toolResults[idx] }
+      }
+    }));
+
+    const followUp = await chat.sendMessage(followUpParts);
 
     const finalResponseText = followUp.response.text();
     return NextResponse.json({
       response: finalResponseText,
       speakText: stripMarkdown(finalResponseText),
-      action: clientAction,
+      action: clientActions[0] || null,
+      actions: clientActions,
       products: productsMetadata,
       isMock: false
     });
