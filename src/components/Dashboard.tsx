@@ -35,6 +35,7 @@ interface Product {
   price: number;
   stock: number;
   minStock: number;
+  attributes?: string | null;
   category?: { name: string } | null;
   supplier?: { name: string } | null;
 }
@@ -117,7 +118,7 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
   // Modal for adding product
   const [showAddProductModal, setShowAddProductModal] = useState<boolean>(false);
   const [newProduct, setNewProduct] = useState({
-    name: '', sku: '', price: '', stock: '', minStock: '5'
+    name: '', sku: '', price: '', stock: '', minStock: '5', attributes: ''
   });
 
   const fetchData = async () => {
@@ -301,7 +302,7 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
       });
       if (res.ok) {
         setShowAddProductModal(false);
-        setNewProduct({ name: '', sku: '', price: '', stock: '', minStock: '5' });
+        setNewProduct({ name: '', sku: '', price: '', stock: '', minStock: '5', attributes: '' });
         fetchData();
       }
     } catch (err) {
@@ -723,7 +724,14 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
                     
                     return (
                       <tr key={prod.id} className="hover:bg-slate-50/50 transition text-slate-600">
-                        <td className="py-3.5 px-4 font-bold text-slate-800">{prod.name}</td>
+                        <td className="py-3.5 px-4 font-bold text-slate-800">
+                          {prod.name}
+                          {prod.attributes && (
+                            <span className="ml-2 px-2 py-0.5 text-[10px] font-bold bg-slate-100 text-slate-600 rounded-full border border-slate-200">
+                              {prod.attributes}
+                            </span>
+                          )}
+                        </td>
                         <td className="py-3.5 px-4 font-mono text-slate-500 text-xs">{prod.sku}</td>
                         <td className="py-3.5 px-4">Rp {prod.price.toLocaleString('id-ID')}</td>
                         <td className="py-3.5 px-4 font-semibold text-slate-800">{prod.stock} unit</td>
@@ -889,6 +897,17 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
                   className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-950 focus:outline-none focus:ring-2 focus:ring-emerald-400"
                   value={newProduct.name}
                   onChange={(e) => setNewProduct({ ...newProduct, name: e.target.value })}
+                />
+              </div>
+
+              <div className="space-y-1">
+                <label className="text-slate-500 text-xs font-bold">Atribut/Varian (Opsional)</label>
+                <input
+                  type="text"
+                  placeholder="Contoh: Rasa Rendang, Aceh, Original, Merah, dll"
+                  className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-950 focus:outline-none focus:ring-2 focus:ring-emerald-400"
+                  value={newProduct.attributes}
+                  onChange={(e) => setNewProduct({ ...newProduct, attributes: e.target.value })}
                 />
               </div>
 

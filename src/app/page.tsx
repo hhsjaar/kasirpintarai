@@ -449,7 +449,12 @@ export default function Home() {
                                     <span className="font-bold text-slate-800 text-xs block truncate" title={prod.name}>
                                       {prod.name}
                                     </span>
-                                    <span className="text-[10px] text-slate-400 font-mono block">
+                                    {prod.attributes && (
+                                      <span className="inline-block mt-0.5 px-1.5 py-0.5 bg-slate-100 text-slate-600 rounded text-[9px] font-bold border border-slate-200/50">
+                                        {prod.attributes}
+                                      </span>
+                                    )}
+                                    <span className="text-[10px] text-slate-400 font-mono block mt-0.5">
                                       {prod.sku}
                                     </span>
                                   </div>

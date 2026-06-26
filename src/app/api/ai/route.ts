@@ -368,6 +368,41 @@ async function handleMockAI(
       }
     }
 
+    // Intercept variant selection if AI asked for product variant in previous message
+    const isAwaitingVariant = lastModelMessage.toLowerCase().includes('varian') || lastModelMessage.toLowerCase().includes('rasa');
+    if (isAwaitingVariant && !hasKasbonKeywords && !query.includes('bayar') && !query.includes('checkout') && !query.includes('selesai')) {
+      let targetSku = '';
+      if (query.includes('rendang')) {
+        targetSku = 'IND-GOR-REN';
+      } else if (query.includes('aceh')) {
+        targetSku = 'IND-GOR-ACH';
+      } else if (query.includes('original') || query.includes('ori')) {
+        targetSku = 'IND-GOR-ORI';
+      }
+      
+      if (targetSku) {
+        const prod = await prisma.product.findUnique({ where: { sku: targetSku } });
+        if (prod) {
+          if (prod.stock < 1) {
+            return NextResponse.json({
+              response: `Maaf Kak, stok ${prod.name} ${prod.attributes} sedang habis.`,
+              speakText: `Stok ${prod.name} ${prod.attributes} habis Kak.`,
+              action: null,
+              isMock: true
+            });
+          }
+          return NextResponse.json({
+            response: `Oke Kak, siap! Berhasil menambahkan 1x ${prod.name} (${prod.attributes}) ke keranjang. Ada lagi yang mau ditambah?`,
+            speakText: `Berhasil menambahkan ${prod.name} ${prod.attributes} ke keranjang.`,
+            action: { type: 'ADD_TO_CART', payload: { product: prod, quantity: 1 } },
+            actions: [{ type: 'ADD_TO_CART', payload: { product: prod, quantity: 1 } }],
+            products: [prod],
+            isMock: true
+          });
+        }
+      }
+    }
+
     // Case C: User is asking to checkout or pay, but we haven't asked for confirmation yet
     const isCheckoutQuery = query.includes('bayar') || query.includes('checkout') || query.includes('selesai') || query.includes('konfirmasi') || hasKasbonKeywords;
     if (isCheckoutQuery && !isAwaitingConfirmation) {
@@ -529,6 +564,22 @@ async function handleMockAI(
     const isPurchaseQuery = query.includes('beli') || query.includes('pesan') || query.includes('tambah') || query.includes('order') || query.includes('ambil');
     
     if (isPurchaseQuery) {
+      // Intercept ambiguous "indomie" purchase query in Mock mode
+      if (query.includes('indomie') || query.includes('goreng')) {
+        const hasRendang = query.includes('rendang');
+        const hasAceh = query.includes('aceh');
+        const hasOriginal = query.includes('original') || query.includes('ori');
+        
+        if (!hasRendang && !hasAceh && !hasOriginal) {
+          return NextResponse.json({
+            response: 'Kak, Indomie Goreng ada beberapa varian nih: Original, Rasa Rendang, dan Rasa Aceh. Kakak mau varian yang mana ya? 😊',
+            speakText: 'Indomie Goreng ada beberapa varian Kak. Mau yang Original, Rasa Rendang, atau Rasa Aceh?',
+            action: null,
+            isMock: true
+          });
+        }
+      }
+
       // Check for Indonesian number words
       const idNumMap: Record<string, number> = {
         satu: 1, dua: 2, tiga: 3, empat: 4, lima: 5,
@@ -913,9 +964,14 @@ async function handleRealGeminiAI(
     
     PENTING: Gunakan bahasa Indonesia sehari-hari yang sangat luwes, hangat, asyik, dan bersahabat layaknya seorang penjaga kasir retail yang ramah dan interaktif (Gunakan panggilan santun seperti "Kak" kepada customer, serta partikel percakapan yang alami seperti "ya", "nih", "oke"). Hindari bahasa yang terlalu formal, kaku, atau monoton.
     
+    ATURAN VARIAN & ATRIBUT PRODUK:
+    - PENTING: Beberapa produk memiliki beberapa varian (atribut) di database (misalnya: "Indomie Goreng" memiliki varian "Original", "Rasa Rendang", dan "Rasa Aceh").
+    - Jika customer memesan atau menanyakan produk secara umum tanpa menyebutkan variannya (misalnya "beli indomie goreng" atau "ada indomie?") dan alat 'getCartAction' mengembalikan error 'AMBIGUOUS_PRODUCT', Anda WAJIB bertanya balik secara ramah untuk meminta konfirmasi varian mana yang mereka inginkan. Sebutkan varian-varian yang tersedia (seperti Original, Rasa Rendang, atau Rasa Aceh) agar customer bisa memilih dengan mudah. Jangan pernah menambahkan varian acak tanpa persetujuan customer!
+    - Jika customer sudah menyebutkan varian secara spesifik (misal: "beli indomie goreng rendang"), Anda harus memanggil 'getCartAction' dengan 'skuOrName' yang spesifik (misal: "indomie goreng rendang") agar database mencocokkannya secara unik dan langsung menambahkannya ke keranjang.
+    
     ATURAN BACA SUARA:
     - Jangan pernah menyebutkan nomor invoice (seperti "INV-12345") atau ID transaksi dalam balasan suara/teks. Cukup sampaikan konfirmasi sukses atau total belanjanya saja secara ramah.
-    - PENTING: Tulis singkatan "AI" tetap sebagai "AI" di teks balasan chat window (JANGAN ditulis sebagai "e ai" atau "e-ai"). Mesin suara client secara otomatis akan melafalkannya sebagai "e-ai" secara dinamis.
+    - PENTING: Tulis singkatan "AI" tetap sebagai "AI" di teks balasan chat window (JANGAN ditulis sebagai "e ai" or "e-ai"). Mesin suara client secara otomatis akan melafalkannya sebagai "e-ai" secara dinamis.
     
     DILARANG menggunakan kosakata bahasa Melayu Malaysia seperti "sila" (gunakan "silakan"), "kedai" (gunakan "toko"), "senarai" (gunakan "daftar"), "pemilik" (gunakan "owner"), atau kosakata Melayu lainnya yang tidak lazim di Indonesia.
       ATURAN CUSTOMER MODE:
@@ -925,8 +981,8 @@ async function handleRealGeminiAI(
     - PENTING: Jika pelanggan bertanya tentang daftar produk yang ada (misal: "produknya apa saja?", "ada barang apa saja?", "lihat daftarnya dong"), JANGAN menyebutkan atau mendaftar seluruh produk tersebut satu per satu karena akan memakan waktu lama. Sebaliknya, jawablah dengan ramah dan katakan bahwa semua produk yang tersedia dapat dilihat secara langsung di etalase menu atau layar POS.
     - KELOLA KONTEKS: Jika pelanggan memerintahkan tindakan secara implisit atau merujuk ke produk dari riwayat percakapan sebelumnya (misalnya, mereka bertanya "berapa harga aqua botol?" lalu berkata "oke tambahkan ke keranjang" atau "beli itu"), Anda HARUS melacak nama produk terakhir yang dibahas dari percakapan sebelumnya (misalnya: "aqua botol") dan mengirimkannya sebagai parameter 'skuOrName' ke 'getCartAction' dengan aksi 'ADD'. Jangan bertanya ulang produk apa yang ingin dibeli jika produk tersebut jelas dari konteks percakapan di atas.
     - Panggil 'getCartAction' dengan aksi 'REMOVE' jika pelanggan ingin menghapus produk dari keranjang.
-    - Panggil 'getCartAction' dengan aksi 'CLEAR' jika pelanggan ingin mengosongkan keranjang.
-    - Hanya panggil 'searchProducts' jika pelanggan sekadar bertanya tentang keberadaan produk, mencari barang, atau bertanya harga produk tanpa berniat membelinya secara langsung (misal: "apakah ada indomie?", "berapa harga aqua?", "cari produk susu").").
+    - Panggil 'getCartAction' with action 'CLEAR' if the user wants to empty the cart.
+    - Hanya panggil 'searchProducts' jika pelanggan sekadar bertanya tentang keberadaan produk, mencari barang, atau bertanya harga produk tanpa berniat membelinya secara langsung (misal: "apakah ada indomie?", "berapa harga aqua?", "cari produk susu").
     
     ATURAN CHECKOUT / BAYAR:
     - PENTING: Ketika pelanggan menyatakan ingin membayar, checkout, atau selesai belanja (misal: "checkout dong", "saya mau bayar", "sudah selesai belanja"), Anda JANGAN langsung memanggil 'checkoutCart'. 
@@ -1122,7 +1178,7 @@ async function handleRealGeminiAI(
     if (funcName === 'searchProducts') {
       const q = args.query ? args.query.trim() : '';
       const qLower = q.toLowerCase();
-      let products;
+      let products: any[];
 
       const isGeneralQuery = !q || 
         qLower === 'semua' || 
@@ -1140,31 +1196,24 @@ async function handleRealGeminiAI(
         });
       } else {
         const { cleaned } = cleanProductSearchQuery(q);
-        products = await prisma.product.findMany({
-          where: {
-            OR: [
-              { name: { contains: cleaned, mode: 'insensitive' } },
-              { sku: { equals: cleaned, mode: 'insensitive' } },
-              { name: { contains: q, mode: 'insensitive' } },
-              { sku: { equals: q, mode: 'insensitive' } }
-            ]
-          },
-          include: { category: true }
-        });
-
-        // If no products found, try keyword split matching
-        if (products.length === 0 && cleaned.length > 0) {
-          const keywords = cleaned.split(/\s+/).filter(k => k.length > 0);
-          if (keywords.length > 0) {
-            products = await prisma.product.findMany({
-              where: {
-                AND: keywords.map(kw => ({
-                  name: { contains: kw, mode: 'insensitive' }
-                }))
-              },
-              include: { category: true }
-            });
-          }
+        const searchSource = cleaned || q;
+        const keywords = searchSource.split(/\s+/).filter((k: string) => k.length > 0);
+        
+        if (keywords.length > 0) {
+          products = await prisma.product.findMany({
+            where: {
+              AND: keywords.map((kw: string) => ({
+                OR: [
+                  { name: { contains: kw, mode: 'insensitive' } },
+                  { attributes: { contains: kw, mode: 'insensitive' } },
+                  { sku: { contains: kw, mode: 'insensitive' } }
+                ]
+              }))
+            },
+            include: { category: true }
+          });
+        } else {
+          products = [];
         }
       }
       toolResult = { products };
@@ -1185,62 +1234,83 @@ async function handleRealGeminiAI(
           quantity = parsedQuantity;
         }
 
-        let product = await prisma.product.findUnique({ where: { sku: cleaned.toUpperCase() } });
-        if (!product) {
-          product = await prisma.product.findUnique({ where: { sku: skuOrName } });
-        }
-        if (!product) {
-          // Fallback: search by name contains or sku equals (case-insensitive)
-          product = await prisma.product.findFirst({
-            where: {
-              OR: [
-                { name: { contains: cleaned, mode: 'insensitive' } },
-                { sku: { equals: cleaned, mode: 'insensitive' } },
-                { name: { contains: skuOrName, mode: 'insensitive' } },
-                { sku: { equals: skuOrName, mode: 'insensitive' } }
-              ]
-            }
-          });
-        }
+        let matchingProducts: any[] = [];
+        
+        // 1. Try exact match by SKU first (case-insensitive)
+        let product = await prisma.product.findFirst({
+          where: {
+            OR: [
+              { sku: { equals: cleaned.toUpperCase() } },
+              { sku: { equals: skuOrName.toUpperCase() } },
+              { sku: { equals: cleaned } },
+              { sku: { equals: skuOrName } }
+            ]
+          }
+        });
 
-        // If still not found, split cleaned query into keywords and match all
-        if (!product && cleaned.length > 0) {
-          const keywords = cleaned.split(/\s+/).filter(k => k.length > 0);
+        if (product) {
+          matchingProducts = [product];
+        } else {
+          // 2. Keyword-based multi-field search (across name, attributes, and SKU)
+          const searchSource = cleaned || skuOrName;
+          const keywords = searchSource.split(/\s+/).filter((k: string) => k.length > 0);
           if (keywords.length > 0) {
-            product = await prisma.product.findFirst({
+            matchingProducts = await prisma.product.findMany({
               where: {
-                AND: keywords.map(kw => ({
-                  name: { contains: kw, mode: 'insensitive' }
+                AND: keywords.map((kw: string) => ({
+                  OR: [
+                    { name: { contains: kw, mode: 'insensitive' } },
+                    { attributes: { contains: kw, mode: 'insensitive' } },
+                    { sku: { contains: kw, mode: 'insensitive' } }
+                  ]
                 }))
               }
             });
           }
         }
 
-        if (!product) {
-          toolResult = { success: false, error: `Produk dengan SKU atau nama "${skuOrName}" tidak ditemukan.` };
-        } else if (action === 'ADD') {
-          if (product.stock < quantity) {
-            toolResult = { success: false, error: `Stok ${product.name} tidak cukup. Sisa: ${product.stock}` };
-          } else {
+        if (matchingProducts.length > 1) {
+          toolResult = { 
+            success: false, 
+            error: 'AMBIGUOUS_PRODUCT', 
+            message: `Terdapat beberapa pilihan produk/varian yang cocok untuk pencarian "${skuOrName}". Silakan minta konfirmasi dari customer untuk memilih salah satu.`, 
+            products: matchingProducts.map(p => ({
+              id: p.id,
+              name: p.name,
+              sku: p.sku,
+              price: p.price,
+              stock: p.stock,
+              attributes: p.attributes
+            }))
+          };
+        } else if (matchingProducts.length === 1) {
+          const singleProduct = matchingProducts[0];
+          
+          if (action === 'ADD') {
+            if (singleProduct.stock < quantity) {
+              toolResult = { success: false, error: `Stok ${singleProduct.name} tidak cukup. Sisa: ${singleProduct.stock}` };
+            } else {
+              toolResult = { 
+                success: true, 
+                product: singleProduct, 
+                quantity, 
+                price: singleProduct.price, 
+                subtotal: singleProduct.price * quantity 
+              };
+              clientAction = { type: 'ADD_TO_CART', payload: { product: singleProduct, quantity } };
+            }
+          } else if (action === 'REMOVE') {
             toolResult = { 
               success: true, 
-              product, 
+              product: singleProduct, 
               quantity, 
-              price: product.price, 
-              subtotal: product.price * quantity 
+              price: singleProduct.price, 
+              subtotal: singleProduct.price * quantity 
             };
-            clientAction = { type: 'ADD_TO_CART', payload: { product, quantity } };
+            clientAction = { type: 'REMOVE_FROM_CART', payload: { productId: singleProduct.id } };
           }
-        } else if (action === 'REMOVE') {
-          toolResult = { 
-            success: true, 
-            product, 
-            quantity, 
-            price: product.price, 
-            subtotal: product.price * quantity 
-          };
-          clientAction = { type: 'REMOVE_FROM_CART', payload: { productId: product.id } };
+        } else {
+          toolResult = { success: false, error: `Produk dengan SKU atau nama "${skuOrName}" tidak ditemukan.` };
         }
       }
     } 

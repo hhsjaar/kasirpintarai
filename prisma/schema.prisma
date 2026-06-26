@@ -23,6 +23,7 @@ model Product {
   price            Float
   stock            Int
   minStock         Int               @default(5)
+  attributes       String?           // For variants (e.g. "Rasa Rendang", "Original", etc.)
   categoryId       String?
   category         Category?         @relation(fields: [categoryId], references: [id])
   supplierId       String?
