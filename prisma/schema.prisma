@@ -90,6 +90,16 @@ model PushSubscription {
   createdAt DateTime @default(now())
 }
 
+model Debtor {
+  id         String   @id @default(uuid())
+  code       String   @unique
+  name       String   @unique
+  accessCode String   @default("1234")
+  kasbons    Kasbon[]
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+}
+
 model Kasbon {
   id            String      @id @default(uuid())
   buyerName     String
@@ -97,7 +107,10 @@ model Kasbon {
   status        String      // "UNPAID", "PAID"
   transactionId String?     @unique
   transaction   Transaction? @relation(fields: [transactionId], references: [id], onDelete: Cascade)
+  debtorId      String?
+  debtor        Debtor?     @relation(fields: [debtorId], references: [id], onDelete: Cascade)
   createdAt     DateTime    @default(now())
   updatedAt     DateTime    @updatedAt
 }
+
 

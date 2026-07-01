@@ -16,7 +16,9 @@ import {
   Bell,
   BellOff,
   Zap,
-  Activity
+  Activity,
+  Edit,
+  Key
 } from 'lucide-react';
 import { 
   AreaChart, 
@@ -98,6 +100,10 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
     amount: number;
     status: string;
     createdAt: string;
+    debtor?: {
+      code: string;
+      name: string;
+    } | null;
     transaction?: {
       invoiceNumber: string;
       items: Array<{
@@ -106,7 +112,20 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
       }>;
     } | null;
   }
+
+  interface DebtorItem {
+    id: string;
+    code: string;
+    name: string;
+    accessCode: string;
+    totalDebt: number;
+    totalPaid: number;
+    createdAt: string;
+    updatedAt: string;
+  }
+
   const [kasbons, setKasbons] = useState<KasbonItem[]>([]);
+  const [debtors, setDebtors] = useState<DebtorItem[]>([]);
   const [activeTab, setActiveTab] = useState<'analytics' | 'inventory' | 'kasbon'>('analytics');
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
 
@@ -139,7 +158,8 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
       setProducts(dataProd);
       setTransactions(dataTxn);
       setNotifications(dataNotif);
-      setKasbons(dataKas);
+      setKasbons(dataKas && Array.isArray(dataKas.kasbons) ? dataKas.kasbons : []);
+      setDebtors(dataKas && Array.isArray(dataKas.debtors) ? dataKas.debtors : []);
       
     } catch (err) {
       console.error('Error fetching dashboard data:', err);
@@ -161,6 +181,75 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
         fetchData();
       } else {
         alert('Gagal melunasi kasbon.');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleSettleDebtorAll = async (debtorId: string, debtorName: string) => {
+    if (!confirm(`Apakah Anda yakin ingin melunasi SELURUH kasbon atas nama "${debtorName}"?`)) return;
+    try {
+      const res = await fetch('/api/kasbon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ debtorId })
+      });
+      if (res.ok) {
+        fetchData();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Gagal melunasi seluruh kasbon.');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleCreateDebtor = async () => {
+    const name = prompt('Masukkan nama lengkap pengkasbon baru:');
+    if (name === null) return;
+    if (name.trim() === '') {
+      alert('Nama tidak boleh kosong.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/kasbon', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'create_debtor', name: name.trim() })
+      });
+      if (res.ok) {
+        const data = await res.json();
+        alert(`Pengkasbon "${data.debtor.name}" berhasil didaftarkan!\n\nKode Kasbon: ${data.debtor.code}\nPIN / Kode Akses Keamanan: ${data.debtor.accessCode}`);
+        fetchData();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Gagal mendaftarkan pengkasbon baru.');
+      }
+    } catch (err) {
+      console.error(err);
+    }
+  };
+
+  const handleUpdateAccessCode = async (debtorId: string, currentCode: string) => {
+    const newCode = prompt(`Masukkan PIN/Kode Akses baru untuk debitur (saat ini: "${currentCode}"):`);
+    if (newCode === null) return;
+    if (newCode.trim() === '') {
+      alert('Kode akses tidak boleh kosong.');
+      return;
+    }
+    try {
+      const res = await fetch('/api/kasbon', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ debtorId, accessCode: newCode.trim() })
+      });
+      if (res.ok) {
+        fetchData();
+      } else {
+        const data = await res.json();
+        alert(data.error || 'Gagal memperbarui kode akses.');
       }
     } catch (err) {
       console.error(err);
@@ -797,11 +886,89 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
             </div>
           </div>
 
-          {/* Kasbon Table List */}
-          <div className="glass-panel p-5 rounded-2xl space-y-4 bg-white border border-slate-150">
+          {/* Section 1: Daftar Pengkasbon (Debtors Directory) */}
+          <div className="glass-panel p-5 rounded-2xl space-y-4 bg-white border border-slate-150 shadow-sm">
+            <div className="flex items-center justify-between flex-wrap gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">Daftar Pengkasbon (Buku Debitur)</h3>
+                <p className="text-slate-500 text-xs mt-0.5">Buku besar piutang per pelanggan. Setiap pelanggan memiliki kode unik. Hutang baru akan otomatis terakumulasi di sini.</p>
+              </div>
+              <button
+                onClick={handleCreateDebtor}
+                className="px-4 py-2 bg-emerald-600 hover:bg-emerald-700 text-white font-bold rounded-xl text-xs transition shadow-sm cursor-pointer flex items-center gap-1.5"
+              >
+                <Plus className="w-4 h-4" />
+                Tambah Pengkasbon
+              </button>
+            </div>
+
+            <div className="overflow-x-auto">
+              <table className="w-full text-sm text-left border-collapse">
+                <thead>
+                  <tr className="border-b border-slate-150 text-slate-400 text-xs font-bold uppercase">
+                    <th className="py-3 px-4">Kode Kasbon</th>
+                    <th className="py-3 px-4">Nama Pengkasbon</th>
+                    <th className="py-3 px-4">PIN / Kode Akses</th>
+                    <th className="py-3 px-4">Total Hutang Aktif</th>
+                    <th className="py-3 px-4">Total Sudah Dilunasi</th>
+                    <th className="py-3 px-4 text-center">Tindakan</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-100">
+                  {debtors.length === 0 ? (
+                    <tr>
+                      <td colSpan={6} className="text-center py-8 text-slate-400 text-xs">Belum ada data pengkasbon terdaftar.</td>
+                    </tr>
+                  ) : (
+                    debtors.map((d) => (
+                      <tr key={d.id} className="hover:bg-slate-50/50 transition text-slate-650">
+                        <td className="py-3.5 px-4 font-mono font-bold text-xs text-emerald-600">{d.code}</td>
+                        <td className="py-3.5 px-4 font-bold text-slate-800">{d.name}</td>
+                        <td className="py-3.5 px-4">
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs font-bold">{d.accessCode || '1234'}</span>
+                            <button
+                              onClick={() => handleUpdateAccessCode(d.id, d.accessCode || '1234')}
+                              className="text-slate-400 hover:text-emerald-500 hover:bg-slate-100 p-1 rounded transition cursor-pointer"
+                              title="Edit Kode Akses"
+                            >
+                              <Edit className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        </td>
+                        <td className="py-3.5 px-4 font-extrabold">
+                          {d.totalDebt > 0 ? (
+                            <span className="text-rose-600">Rp {d.totalDebt.toLocaleString('id-ID')}</span>
+                          ) : (
+                            <span className="text-slate-400 font-normal">Lunas (Rp 0)</span>
+                          )}
+                        </td>
+                        <td className="py-3.5 px-4 text-slate-500">Rp {d.totalPaid.toLocaleString('id-ID')}</td>
+                        <td className="py-3.5 px-4 text-center">
+                          {d.totalDebt > 0 ? (
+                            <button
+                              onClick={() => handleSettleDebtorAll(d.id, d.name)}
+                              className="px-3 py-1 bg-emerald-50 hover:bg-emerald-500 hover:text-white text-emerald-600 hover:border-emerald-500 border border-emerald-200 rounded-lg text-3xs font-bold transition cursor-pointer mx-auto shadow-sm"
+                            >
+                              Lunasi Semua
+                            </button>
+                          ) : (
+                            <span className="text-emerald-600 font-extrabold text-3xs uppercase bg-emerald-50 px-2.5 py-0.5 rounded-full">Lunas</span>
+                          )}
+                        </td>
+                      </tr>
+                    ))
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          {/* Section 2: Riwayat Kasbon (Transactions History) */}
+          <div className="glass-panel p-5 rounded-2xl space-y-4 bg-white border border-slate-150 shadow-sm">
             <div>
-              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">Catatan Hutang / Kasbon</h3>
-              <p className="text-slate-500 text-xs mt-0.5">Kelola piutang pembeli. Tekan tombol &ldquo;Tandai Lunas&rdquo; jika pembeli telah melunasi kasbonnya.</p>
+              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-wider">Detail Riwayat Transaksi Kasbon</h3>
+              <p className="text-slate-500 text-xs mt-0.5">Daftar lengkap per transaksi kasbon yang dicatat di sistem.</p>
             </div>
 
             <div className="overflow-x-auto">
@@ -809,23 +976,25 @@ export default function Dashboard({ refreshTrigger, onRefreshCompleted }: Dashbo
                 <thead>
                   <tr className="border-b border-slate-150 text-slate-400 text-xs font-bold uppercase">
                     <th className="py-3 px-4">Nama Pembeli</th>
+                    <th className="py-3 px-4">Kode Kasbon</th>
                     <th className="py-3 px-4">Invoice</th>
                     <th className="py-3 px-4">Waktu Transaksi</th>
                     <th className="py-3 px-4">Detail Belanja</th>
                     <th className="py-3 px-4">Total Kasbon</th>
                     <th className="py-3 px-4">Status</th>
-                    <th className="py-3 px-4 text-center">Aksi Pelunasan</th>
+                    <th className="py-3 px-4 text-center">Aksi</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {kasbons.length === 0 ? (
                     <tr>
-                      <td colSpan={7} className="text-center py-8 text-slate-400 text-xs">Belum ada catatan kasbon.</td>
+                      <td colSpan={8} className="text-center py-8 text-slate-400 text-xs">Belum ada catatan transaksi kasbon.</td>
                     </tr>
                   ) : (
                     kasbons.map((k) => (
                       <tr key={k.id} className="hover:bg-slate-50/50 transition text-slate-650">
                         <td className="py-3.5 px-4 font-bold text-slate-800">{k.buyerName}</td>
+                        <td className="py-3.5 px-4 font-mono text-xs font-bold text-emerald-600">{k.debtor?.code || '-'}</td>
                         <td className="py-3.5 px-4 font-mono text-xs">{k.transaction?.invoiceNumber || '-'}</td>
                         <td className="py-3.5 px-4 text-xs">
                           {new Date(k.createdAt).toLocaleString('id-ID', { dateStyle: 'short', timeStyle: 'short' })}

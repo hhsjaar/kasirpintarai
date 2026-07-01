@@ -38,11 +38,13 @@ export default function Home() {
   const [chatLogs, setChatLogs] = useState<ChatLog[]>([]);
   const [dashboardRefreshTrigger, setDashboardRefreshTrigger] = useState<number>(0);
   const [mockCheckout, setMockCheckout] = useState<{ invoiceNumber: string; totalAmount: number; token: string } | null>(null);
+  const [checkoutSuccessActive, setCheckoutSuccessActive] = useState<boolean>(false);
   
   // Checkout Modal State
   const [showCheckoutModal, setShowCheckoutModal] = useState<boolean>(false);
   const [manualPaymentType, setManualPaymentType] = useState<'MIDTRANS' | 'KASBON'>('MIDTRANS');
   const [manualBuyerName, setManualBuyerName] = useState<string>('');
+  const [manualAccessCode, setManualAccessCode] = useState<string>('');
   const [checkoutLoading, setCheckoutLoading] = useState<boolean>(false);
 
   // Ref to automatically scroll the chat container to bottom
@@ -207,6 +209,7 @@ export default function Home() {
         const { token } = payload;
         if (token) {
           handleMidtransPay(token);
+          setCheckoutSuccessActive(true);
         } else {
           triggerToast('Transaksi gagal: Token Midtrans tidak ditemukan.', 'alert');
         }
@@ -216,6 +219,7 @@ export default function Home() {
       case 'KASBON_CHECKOUT_SUCCESS': {
         const { totalAmount, buyerName } = payload;
         triggerToast(`Kasbon dicatat: Rp ${totalAmount.toLocaleString('id-ID')} atas nama ${buyerName}`, 'success');
+        setCheckoutSuccessActive(true);
         break;
       }
 
@@ -265,6 +269,7 @@ export default function Home() {
     if (cart.length === 0) return;
     setManualPaymentType('MIDTRANS');
     setManualBuyerName('');
+    setManualAccessCode('');
     setShowCheckoutModal(true);
   };
 
@@ -272,6 +277,10 @@ export default function Home() {
     if (cart.length === 0) return;
     if (manualPaymentType === 'KASBON' && !manualBuyerName.trim()) {
       triggerToast('Nama pembeli wajib diisi untuk Kasbon', 'alert');
+      return;
+    }
+    if (manualPaymentType === 'KASBON' && !manualAccessCode.trim()) {
+      triggerToast('Kode akses wajib diisi untuk Kasbon', 'alert');
       return;
     }
 
@@ -283,7 +292,8 @@ export default function Home() {
         body: JSON.stringify({
           items: cart.map(c => ({ sku: c.sku, quantity: c.quantity })),
           paymentType: manualPaymentType,
-          buyerName: manualBuyerName
+          buyerName: manualBuyerName,
+          accessCode: manualAccessCode
         })
       });
       const data = await res.json();
@@ -292,6 +302,7 @@ export default function Home() {
         setShowCheckoutModal(false);
         if (manualPaymentType === 'KASBON') {
           setManualBuyerName('');
+          setManualAccessCode('');
           triggerToast(`Kasbon berhasil dicatat atas nama ${data.buyerName || manualBuyerName}`, 'success');
           handleTranscriptReceived("", `Pesanan berhasil dan transaksi sukses. Transaksi Kasbon berhasil dicatat atas nama "${data.buyerName || manualBuyerName}" sebesar Rp ${data.totalAmount.toLocaleString('id-ID')}.`);
           setVoiceCommandToSpeak({
@@ -406,6 +417,7 @@ export default function Home() {
                   voiceCommandToSpeak={voiceCommandToSpeak}
                   chatLogs={chatLogs}
                   onSpeakingFinished={handleSpeakingFinished}
+                  checkoutSuccessActive={checkoutSuccessActive}
                 />
               </div>
 
@@ -623,70 +635,121 @@ export default function Home() {
               <span className="text-xs bg-emerald-50 text-emerald-600 px-2.5 py-0.5 rounded-full font-bold uppercase tracking-wider">
                 Pembayaran Toko
               </span>
-              <h3 className="text-lg font-bold text-slate-800 mt-2">Pilih Metode Pembayaran</h3>
+              <h3 className="text-lg font-bold text-slate-800 mt-2">Selesaikan Pembayaran</h3>
               <p className="text-slate-500 text-xs mt-1">Total: <span className="font-extrabold text-emerald-650">Rp {cartTotal.toLocaleString('id-ID')}</span></p>
             </div>
 
-            {/* Selection */}
-            <div className="grid grid-cols-2 gap-3.5">
-              <button
-                type="button"
-                onClick={() => setManualPaymentType('MIDTRANS')}
-                className={`p-4 rounded-2xl border text-center transition cursor-pointer flex flex-col items-center justify-center gap-2 ${
-                  manualPaymentType === 'MIDTRANS'
-                    ? 'border-emerald-500 bg-emerald-50/10 text-slate-850 shadow-sm'
-                    : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
-                }`}
-              >
-                <CreditCard className="w-5.5 h-5.5 text-emerald-650" />
-                <span className="text-[11px] font-bold">QRIS / Midtrans</span>
-              </button>
+            {/* Payment Summary & Action View */}
+            {manualPaymentType === 'MIDTRANS' ? (
+              <div className="space-y-4">
+                <div className="p-4 bg-slate-50 rounded-2xl border border-slate-100 flex items-center gap-3 text-left">
+                  <div className="p-3 bg-emerald-100/60 rounded-xl text-emerald-600">
+                    <CreditCard className="w-5.5 h-5.5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-slate-800 text-sm">QRIS / Midtrans</h4>
+                    <p className="text-slate-400 text-3xs font-medium uppercase tracking-wider mt-0.5">Pembayaran Instan & Otomatis</p>
+                  </div>
+                </div>
 
-              <button
-                type="button"
-                onClick={() => setManualPaymentType('KASBON')}
-                className={`p-4 rounded-2xl border text-center transition cursor-pointer flex flex-col items-center justify-center gap-2 ${
-                  manualPaymentType === 'KASBON'
-                    ? 'border-emerald-500 bg-emerald-50/10 text-slate-850 shadow-sm'
-                    : 'border-slate-200 bg-white text-slate-500 hover:bg-slate-50'
-                }`}
-              >
-                <User className="w-5.5 h-5.5 text-emerald-600" />
-                <span className="text-[11px] font-bold">Kasbon Pembeli</span>
-              </button>
-            </div>
+                <div className="space-y-2 pt-2">
+                  <button
+                    onClick={handleManualCheckoutConfirm}
+                    disabled={checkoutLoading}
+                    className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition shadow-lg cursor-pointer text-sm disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-1.5"
+                  >
+                    {checkoutLoading ? 'Memproses...' : (
+                      <>
+                        <span>Bayar Sekarang via QRIS</span>
+                        <ArrowRight className="w-4 h-4" />
+                      </>
+                    )}
+                  </button>
 
-            {/* Input name for Kasbon */}
-            {manualPaymentType === 'KASBON' && (
-              <div className="space-y-1 text-left animate-fade-in">
-                <label className="text-slate-500 text-3xs font-black uppercase tracking-wider block">Nama Pembeli</label>
-                <input
-                  type="text"
-                  placeholder="Masukkan nama pembeli..."
-                  className="w-full px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 font-bold focus:outline-none focus:ring-2 focus:ring-emerald-450 focus:border-transparent text-sm"
-                  value={manualBuyerName}
-                  onChange={(e) => setManualBuyerName(e.target.value)}
-                />
+                  <button
+                    onClick={() => setShowCheckoutModal(false)}
+                    disabled={checkoutLoading}
+                    className="w-full py-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-500 font-bold rounded-xl transition text-xs cursor-pointer"
+                  >
+                    Batal
+                  </button>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setManualPaymentType('KASBON');
+                      setManualBuyerName('');
+                      setManualAccessCode('');
+                    }}
+                    className="text-emerald-650 hover:text-emerald-700 font-bold text-xs transition underline decoration-dotted"
+                  >
+                    Catat sebagai Kasbon Pembeli...
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="space-y-4 text-left animate-fade-in">
+                <div className="p-4 bg-rose-50/20 rounded-2xl border border-rose-100 flex items-center gap-3">
+                  <div className="p-3 bg-rose-50 rounded-xl text-rose-500">
+                    <User className="w-5.5 h-5.5" />
+                  </div>
+                  <div>
+                    <h4 className="font-bold text-slate-800 text-sm">Pencatatan Kasbon</h4>
+                    <p className="text-slate-400 text-3xs font-medium uppercase tracking-wider mt-0.5">Hutang / Pembukuan Manual</p>
+                  </div>
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-slate-500 text-3xs font-black uppercase tracking-wider block">Nama atau Kode Kasbon Pembeli</label>
+                  <input
+                    type="text"
+                    placeholder="Nama lengkap atau kode KSB-XXXXXX..."
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 font-bold focus:outline-none focus:ring-2 focus:ring-emerald-450 focus:border-transparent text-sm"
+                    value={manualBuyerName}
+                    onChange={(e) => setManualBuyerName(e.target.value)}
+                  />
+                </div>
+
+                <div className="space-y-1">
+                  <label className="text-slate-500 text-3xs font-black uppercase tracking-wider block">Kode Akses Keamanan (PIN)</label>
+                  <input
+                    type="password"
+                    maxLength={10}
+                    placeholder="Masukkan kode akses Kasbon..."
+                    className="w-full px-4 py-2.5 rounded-xl bg-slate-50 border border-slate-200 text-slate-900 placeholder:text-slate-400 font-bold focus:outline-none focus:ring-2 focus:ring-emerald-450 focus:border-transparent text-sm font-mono tracking-widest"
+                    value={manualAccessCode}
+                    onChange={(e) => setManualAccessCode(e.target.value)}
+                  />
+                  <span className="text-[10px] text-slate-450 block mt-1 leading-normal">
+                    *Masukkan nama dan PIN 1234 untuk pelanggan baru, atau PIN yang terdaftar untuk pelanggan lama agar hutang terakumulasi otomatis.
+                  </span>
+                </div>
+
+                <div className="space-y-2 pt-2 text-center">
+                  <button
+                    onClick={handleManualCheckoutConfirm}
+                    disabled={checkoutLoading || !manualBuyerName.trim() || !manualAccessCode.trim()}
+                    className="w-full py-3 bg-rose-655 hover:bg-rose-500 text-white font-bold rounded-xl transition shadow-lg cursor-pointer text-sm disabled:opacity-50 disabled:cursor-not-allowed"
+                  >
+                    {checkoutLoading ? 'Memproses...' : 'Konfirmasi Kasbon'}
+                  </button>
+
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setManualPaymentType('MIDTRANS');
+                      setManualBuyerName('');
+                      setManualAccessCode('');
+                    }}
+                    className="w-full py-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-500 font-bold rounded-xl transition text-xs cursor-pointer"
+                  >
+                    Kembali ke QRIS
+                  </button>
+                </div>
               </div>
             )}
-
-            <div className="space-y-2 pt-2">
-              <button
-                onClick={handleManualCheckoutConfirm}
-                disabled={checkoutLoading || (manualPaymentType === 'KASBON' && !manualBuyerName.trim())}
-                className="w-full py-3 bg-emerald-600 hover:bg-emerald-500 text-white font-bold rounded-xl transition shadow-lg cursor-pointer text-sm disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                {checkoutLoading ? 'Memproses...' : 'Konfirmasi Pembayaran'}
-              </button>
-              
-              <button
-                onClick={() => setShowCheckoutModal(false)}
-                disabled={checkoutLoading}
-                className="w-full py-2.5 bg-slate-50 hover:bg-slate-100 border border-slate-200 text-slate-500 font-bold rounded-xl transition text-xs cursor-pointer"
-              >
-                Batal
-              </button>
-            </div>
           </div>
         </div>
       )}

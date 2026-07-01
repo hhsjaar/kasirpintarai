@@ -178,6 +178,7 @@ interface VoiceOrbProps {
   voiceCommandToSpeak?: { text: string; timestamp: number };
   chatLogs?: Array<{ sender: 'user' | 'ai'; text: string }>;
   onSpeakingFinished?: (text: string) => void;
+  checkoutSuccessActive?: boolean;
 }
 
 export default function VoiceOrb({
@@ -190,6 +191,7 @@ export default function VoiceOrb({
   voiceCommandToSpeak,
   chatLogs = [],
   onSpeakingFinished,
+  checkoutSuccessActive = false,
 }: VoiceOrbProps) {
   const [state, setState] = useState<OrbState>('idle');
   const [recognitionSupported, setRecognitionSupported] = useState<boolean>(true);
@@ -202,6 +204,8 @@ export default function VoiceOrb({
   const [isTwoWayMode, setIsTwoWayMode] = useState<boolean>(true);
   const [isMounted, setIsMounted] = useState<boolean>(false);
   const [waitingForKasbonName, setWaitingForKasbonName] = useState<boolean>(false);
+  const [waitingForKasbonAccessCode, setWaitingForKasbonAccessCode] = useState<boolean>(false);
+  const [kasbonName, setKasbonName] = useState<string>('');
   const [allowedProductWords, setAllowedProductWords] = useState<Set<string>>(new Set());
 
   useEffect(() => {
@@ -221,6 +225,12 @@ export default function VoiceOrb({
               const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
               if (clean) words.add(clean);
             });
+            if (p.attributes) {
+              p.attributes.toLowerCase().split(/\s+/).forEach((w: string) => {
+                const clean = w.replace(/[.,\/#!$%\^&\*;:{}=\-_`~()]/g, "");
+                if (clean) words.add(clean);
+              });
+            }
           });
           setAllowedProductWords(words);
         }
@@ -252,6 +262,8 @@ export default function VoiceOrb({
   const isTwoWayModeRef = useRef<boolean>(true);
   const stateRef = useRef<OrbState>('idle');
   const waitingForKasbonNameRef = useRef<boolean>(false);
+  const waitingForKasbonAccessCodeRef = useRef<boolean>(false);
+  const kasbonNameRef = useRef<string>('');
   const allowedProductWordsRef = useRef<Set<string>>(new Set());
   const accumulatedTranscriptRef = useRef<string>('');
   const hasSpokenCukupRef = useRef<boolean>(false);
@@ -260,12 +272,23 @@ export default function VoiceOrb({
   const cartItemsRef = useRef<typeof cartItems>(cartItems);
   cartItemsRef.current = cartItems;
 
+  const checkoutSuccessActiveRef = useRef<boolean>(false);
+  checkoutSuccessActiveRef.current = !!checkoutSuccessActive;
+
   const chatLogsRef = useRef<typeof chatLogs>(chatLogs);
   chatLogsRef.current = chatLogs;
 
   useEffect(() => {
     waitingForKasbonNameRef.current = waitingForKasbonName;
   }, [waitingForKasbonName]);
+
+  useEffect(() => {
+    waitingForKasbonAccessCodeRef.current = waitingForKasbonAccessCode;
+  }, [waitingForKasbonAccessCode]);
+
+  useEffect(() => {
+    kasbonNameRef.current = kasbonName;
+  }, [kasbonName]);
 
   useEffect(() => {
     allowedProductWordsRef.current = allowedProductWords;
@@ -509,9 +532,33 @@ export default function VoiceOrb({
           accumulatedTranscriptRef.current = ''; // Clear buffer since we are processing it
 
           if (combinedText) {
-            // Apply product-aware and grammar keyword filter!
-            // If we are waiting for a Kasbon name, we bypass the filter to avoid discarding the user's name.
-            const filteredText = waitingForKasbonNameRef.current
+            // Bypass the speech filter if we are waiting for a Kasbon name or access PIN,
+            // or if the query contains checkout/payment keywords (to ensure names, codes, and PINs are not discarded).
+            const lowerCombined = combinedText.toLowerCase();
+            const isCheckoutOrPayment = 
+              lowerCombined.includes('kasbon') || 
+              lowerCombined.includes('hutang') || 
+              lowerCombined.includes('utang') || 
+              lowerCombined.includes('bayar') || 
+              lowerCombined.includes('checkout') || 
+              lowerCombined.includes('selesai') || 
+              lowerCombined.includes('cukup') || 
+              lowerCombined.includes('qris') || 
+              lowerCombined.includes('midtrans') || 
+              lowerCombined.includes('batal') || 
+              lowerCombined.includes('cancel') || 
+              lowerCombined.includes('kembali') || 
+              lowerCombined.includes('kode') || 
+              lowerCombined.includes('pin') || 
+              lowerCombined.includes('akses') || 
+              lowerCombined.includes('nama');
+
+            const shouldBypassFilter = 
+              waitingForKasbonNameRef.current || 
+              waitingForKasbonAccessCodeRef.current || 
+              isCheckoutOrPayment;
+
+            const filteredText = shouldBypassFilter
               ? combinedText
               : filterSpeechTranscript(combinedText, allowedProductWordsRef.current);
             addDebugLog(`Raw combined speech: "${combinedText}" -> Filtered speech: "${filteredText}"`);
@@ -764,6 +811,23 @@ export default function VoiceOrb({
   const processSpeechInput = async (text: string) => {
     setState('thinking');
 
+    // If checkout was successful, wait for customer to say "terima kasih" / "cukup" to end the conversation and reload
+    if (checkoutSuccessActiveRef.current) {
+      const query = text.toLowerCase();
+      if (query.includes('terima kasih') || query.includes('makasih') || query.includes('cukup') || query.includes('selesai') || query.includes('sudah')) {
+        speakResponse('Sama-sama Kak, terima kasih kembali! Sampai jumpa di transaksi berikutnya.');
+        if (recognitionRef.current) {
+          recognitionRef.current.abort();
+        }
+        isTwoWayModeRef.current = false;
+        isListeningRef.current = false;
+        setTimeout(() => {
+          window.location.reload();
+        }, 5000);
+        return;
+      }
+    }
+
     // Intercept payment-related commands locally if the mock QRIS checkout is active
     if (mockCheckoutActive) {
       const query = text.toLowerCase();
@@ -780,7 +844,11 @@ export default function VoiceOrb({
 
     // Determine final message to send based on context
     let finalMessage = text;
-    if (waitingForKasbonNameRef.current) {
+    if (waitingForKasbonAccessCodeRef.current) {
+      finalMessage = `kasbon atas nama ${kasbonNameRef.current} dengan kode akses ${text}`;
+      setWaitingForKasbonAccessCode(false);
+      setKasbonName('');
+    } else if (waitingForKasbonNameRef.current) {
       finalMessage = `kasbon atas nama ${text}`;
       setWaitingForKasbonName(false);
     }
@@ -821,6 +889,9 @@ export default function VoiceOrb({
             onActionTriggered(action.type, action.payload);
             if (action.type === 'ASK_KASBON_NAME') {
               setWaitingForKasbonName(true);
+            } else if (action.type === 'ASK_KASBON_ACCESS_CODE') {
+              setWaitingForKasbonAccessCode(true);
+              setKasbonName(action.payload?.name || '');
             }
           }
         }
@@ -829,6 +900,9 @@ export default function VoiceOrb({
 
         if (data.action.type === 'ASK_KASBON_NAME') {
           setWaitingForKasbonName(true);
+        } else if (data.action.type === 'ASK_KASBON_ACCESS_CODE') {
+          setWaitingForKasbonAccessCode(true);
+          setKasbonName(data.action.payload?.name || '');
         }
       } else {
         // Fallback: If response conversationally asks for the buyer's name for a kasbon checkout, trigger context
@@ -838,6 +912,12 @@ export default function VoiceOrb({
           (lowerResponse.includes('kasbon') || lowerResponse.includes('hutang') || lowerResponse.includes('pembukuan'))
         ) {
           setWaitingForKasbonName(true);
+        } else if (lowerResponse.includes('kode akses kasbon') || lowerResponse.includes('pin kasbon')) {
+          setWaitingForKasbonAccessCode(true);
+          const nameMatch = (data.response || '').match(/untuk nama "([^"]+)"/i);
+          if (nameMatch) {
+            setKasbonName(nameMatch[1].trim());
+          }
         }
       }
 

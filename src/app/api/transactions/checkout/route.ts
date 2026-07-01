@@ -5,9 +5,31 @@ import { prisma } from '@/lib/db';
 const serverKey = process.env.MIDTRANS_SERVER_KEY;
 const isProduction = false; // Sandbox mode
 
+async function getUniqueDebtorCode(tx: any): Promise<string> {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  while (true) {
+    let result = '';
+    for (let i = 0; i < 6; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    const code = `KSB-${result}`;
+    const existing = await tx.debtor.findUnique({ where: { code } });
+    if (!existing) return code;
+  }
+}
+
+function generateAccessCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = '';
+  for (let i = 0; i < 5; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
 export async function POST(req: Request) {
   try {
-    const { items, paymentType, buyerName } = await req.json();
+    const { items, paymentType, buyerName, accessCode } = await req.json();
 
     if (!items || items.length === 0) {
       return NextResponse.json({ error: 'Cart is empty' }, { status: 400 });
@@ -57,7 +79,44 @@ export async function POST(req: Request) {
 
           const invoiceNumber = 'INV-' + Date.now().toString().slice(-8);
 
-          // Create PENDING transaction with KASBON payment type and create Kasbon record
+          // Debtor Resolution Logic
+          const cleanName = buyerName.trim();
+          let debtor = null;
+
+          // 1. Check if input matches KSB-XXXXXX code format
+          if (/^KSB-[A-Z0-9]{6}$/i.test(cleanName)) {
+            debtor = await tx.debtor.findUnique({
+              where: { code: cleanName.toUpperCase() }
+            });
+          }
+
+          // 2. Search by name (case-insensitive) if not found by code
+          if (!debtor) {
+            debtor = await tx.debtor.findFirst({
+              where: { name: { equals: cleanName, mode: 'insensitive' } }
+            });
+          }
+
+          // 3. Create a new debtor if not found (generate random 5-character PIN if not specified)
+          if (!debtor) {
+            const code = await getUniqueDebtorCode(tx);
+            debtor = await tx.debtor.create({
+              data: {
+                name: cleanName,
+                code: code,
+                accessCode: accessCode ? accessCode.trim() : generateAccessCode()
+              }
+            });
+          } else {
+            // Verify access code for existing debtor (case-insensitive and whitespace-stripped)
+            const cleanAccessInput = accessCode ? accessCode.trim().replace(/\s/g, '').toLowerCase() : '';
+            const cleanDebtorCode = debtor.accessCode ? debtor.accessCode.trim().replace(/\s/g, '').toLowerCase() : '';
+            if (cleanDebtorCode && cleanDebtorCode !== cleanAccessInput) {
+              throw new Error('KASBON_ACCESS_CODE_INVALID');
+            }
+          }
+
+          // Create PENDING transaction with KASBON payment type and create Kasbon record linked to Debtor
           const txn = await tx.transaction.create({
             data: {
               invoiceNumber,
@@ -73,9 +132,10 @@ export async function POST(req: Request) {
               },
               kasbon: {
                 create: {
-                  buyerName: buyerName.trim(),
+                  buyerName: debtor.name, // Use registered debtor name
                   amount: transTotal,
-                  status: 'UNPAID'
+                  status: 'UNPAID',
+                  debtorId: debtor.id
                 }
               }
             }
@@ -97,7 +157,7 @@ export async function POST(req: Request) {
                 productId: item.product.id,
                 type: 'STOCK_OUT',
                 quantity: item.quantity,
-                reason: `Kasbon ${invoiceNumber} oleh ${buyerName}`
+                reason: `Kasbon ${invoiceNumber} oleh ${debtor.name} (${debtor.code})`
               }
             });
 
@@ -112,7 +172,7 @@ export async function POST(req: Request) {
             }
           }
 
-          return { txn, totalAmount: transTotal };
+          return { txn, totalAmount: transTotal, debtor };
         });
 
         return NextResponse.json({
@@ -122,10 +182,15 @@ export async function POST(req: Request) {
           invoiceNumber: result.txn.invoiceNumber,
           transactionId: result.txn.id,
           totalAmount: result.totalAmount,
-          paymentType: 'KASBON'
+          paymentType: 'KASBON',
+          buyerName: result.debtor.name,
+          debtorCode: result.debtor.code
         });
 
       } catch (err: any) {
+        if (err.message === 'KASBON_ACCESS_CODE_INVALID') {
+          return NextResponse.json({ error: 'Kode akses Kasbon salah! Silakan periksa kembali kode akses Anda.' }, { status: 400 });
+        }
         return NextResponse.json({ error: err.message }, { status: 400 });
       }
     }

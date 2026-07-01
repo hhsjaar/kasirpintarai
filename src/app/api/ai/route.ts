@@ -186,8 +186,55 @@ async function performQrisCheckout(cartItems: CartItemInput[]) {
   }
 }
 
-async function performKasbonCheckout(cartItems: CartItemInput[], name: string) {
+async function getUniqueDebtorCode(tx: any): Promise<string> {
+  const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
+  while (true) {
+    let result = '';
+    for (let i = 0; i < 6; i++) {
+      result += chars.charAt(Math.floor(Math.random() * chars.length));
+    }
+    const code = `KSB-${result}`;
+    const existing = await tx.debtor.findUnique({ where: { code } });
+    if (!existing) return code;
+  }
+}
+
+function cleanAccessCode(text: string): string {
+  return text.toLowerCase()
+    .replace(/satu/g, '1')
+    .replace(/dua/g, '2')
+    .replace(/tiga/g, '3')
+    .replace(/empat/g, '4')
+    .replace(/lima/g, '5')
+    .replace(/enam/g, '6')
+    .replace(/tujuh/g, '7')
+    .replace(/delapan/g, '8')
+    .replace(/sembilan/g, '9')
+    .replace(/nol/g, '0')
+    .replace(/kosong/g, '0')
+    .replace(/\s/g, '');
+}
+
+function generateAccessCode(): string {
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+  let result = '';
+  for (let i = 0; i < 5; i++) {
+    result += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return result;
+}
+
+async function performKasbonCheckout(cartItems: CartItemInput[], name: string, accessCode?: string) {
   try {
+    if (!accessCode || accessCode.trim() === '') {
+      return NextResponse.json({
+        response: `Baik Kak, boleh tahu kode akses Kasbon Anda untuk nama "${name}"?`,
+        speakText: `Boleh tahu kode akses Kasbon Anda?`,
+        action: { type: 'ASK_KASBON_ACCESS_CODE', payload: { name } },
+        isMock: true
+      });
+    }
+
     const dbItems: any[] = [];
     let totalAmount = 0;
 
@@ -221,7 +268,43 @@ async function performKasbonCheckout(cartItems: CartItemInput[], name: string) {
 
     const invoiceNumber = 'INV-' + Date.now().toString().slice(-8);
 
-    await prisma.$transaction(async (tx) => {
+    const result = await prisma.$transaction(async (tx) => {
+      const cleanName = name.trim();
+      let debtor = null;
+
+      // 1. Check if input is a code (KSB-XXXXXX)
+      if (/^KSB-[A-Z0-9]{6}$/i.test(cleanName)) {
+        debtor = await tx.debtor.findUnique({
+          where: { code: cleanName.toUpperCase() }
+        });
+      }
+
+      // 2. Search by name (case-insensitive) if not found by code
+      if (!debtor) {
+        debtor = await tx.debtor.findFirst({
+          where: { name: { equals: cleanName, mode: 'insensitive' } }
+        });
+      }
+
+      // 3. Create new Debtor if not found (generate random 5-character PIN if not specified)
+      if (!debtor) {
+        const code = await getUniqueDebtorCode(tx);
+        debtor = await tx.debtor.create({
+          data: {
+            name: cleanName,
+            code: code,
+            accessCode: accessCode ? accessCode.trim() : generateAccessCode()
+          }
+        });
+      } else {
+        // Verify access code for existing debtor (case-insensitive and whitespace-stripped)
+        const cleanAccessInput = accessCode ? accessCode.trim().replace(/\s/g, '').toLowerCase() : '';
+        const cleanDebtorCode = debtor.accessCode ? debtor.accessCode.trim().replace(/\s/g, '').toLowerCase() : '';
+        if (cleanDebtorCode && cleanDebtorCode !== cleanAccessInput) {
+          throw new Error('KASBON_ACCESS_CODE_INVALID');
+        }
+      }
+
       await tx.transaction.create({
         data: {
           invoiceNumber,
@@ -237,9 +320,10 @@ async function performKasbonCheckout(cartItems: CartItemInput[], name: string) {
           },
           kasbon: {
             create: {
-              buyerName: name,
+              buyerName: debtor.name,
               amount: totalAmount,
-              status: 'UNPAID'
+              status: 'UNPAID',
+              debtorId: debtor.id
             }
           }
         }
@@ -255,26 +339,47 @@ async function performKasbonCheckout(cartItems: CartItemInput[], name: string) {
             productId: item.product.id,
             type: 'STOCK_OUT',
             quantity: item.quantity,
-            reason: `Kasbon ${invoiceNumber} oleh ${name}`
+            reason: `Kasbon ${invoiceNumber} oleh ${debtor.name} (${debtor.code})`
           }
         });
       }
+
+      // Calculate total unpaid accumulated kasbon (including this transaction)
+      const unpaidKasbons = await tx.kasbon.findMany({
+        where: {
+          debtorId: debtor.id,
+          status: 'UNPAID'
+        }
+      });
+      const totalAccumulated = unpaidKasbons.reduce((sum, k) => sum + k.amount, 0);
+
+      return { debtor, totalAccumulated };
     });
 
     return NextResponse.json({
-      response: `Transaksi Kasbon berhasil dicatat atas nama "${name}" dengan total Rp ${totalAmount.toLocaleString('id-ID')}. Keranjang belanja telah dikosongkan.`,
-      speakText: `Kasbon berhasil dicatat atas nama ${name} sebesar ${totalAmount} rupiah. Terima kasih!`,
+      response: `Terima kasih Kak, Kasbon sudah selesai dan berhasil dicatat. Total kasbon Anda saat ini adalah Rp ${result.totalAccumulated.toLocaleString('id-ID')}.`,
+      speakText: `Terima kasih, kasbon sudah selesai dan berhasil dicatat. Total kasbon Anda saat ini adalah ${result.totalAccumulated} rupiah.`,
       action: {
         type: 'KASBON_CHECKOUT_SUCCESS',
         payload: {
           invoiceNumber,
           totalAmount,
-          buyerName: name
+          buyerName: result.debtor.name,
+          debtorCode: result.debtor.code,
+          totalAccumulated: result.totalAccumulated
         }
       },
       isMock: true
     });
   } catch (err: any) {
+    if (err.message === 'KASBON_ACCESS_CODE_INVALID') {
+      return NextResponse.json({
+        response: `Maaf Kak, Kode Akses Kasbon salah! Silakan coba lagi dengan kode akses yang benar untuk nama "${name}".`,
+        speakText: `Kode akses Kasbon salah. Silakan coba lagi.`,
+        action: { type: 'ASK_KASBON_ACCESS_CODE', payload: { name } },
+        isMock: true
+      });
+    }
     return NextResponse.json({ response: 'Terjadi kesalahan kasbon: ' + err.message, action: null, isMock: true });
   }
 }
@@ -295,6 +400,27 @@ async function handleMockAI(
       .slice(-1)[0]?.parts[0]?.text || '';
 
     const isAwaitingConfirmation = lastModelMessage.toLowerCase().includes('apakah pesanan') || lastModelMessage.toLowerCase().includes('sudah benar');
+    const isAwaitingAccessCode = lastModelMessage.toLowerCase().includes('kode akses kasbon');
+
+    if (isAwaitingAccessCode) {
+      if (!cartItems || cartItems.length === 0) {
+        return NextResponse.json({
+          response: 'Keranjang belanja Anda masih kosong. Silakan masukkan produk terlebih dahulu.',
+          speakText: 'Keranjang belanja Anda kosong.',
+          action: null,
+          isMock: true
+        });
+      }
+
+      // Extract the name from lastModelMessage which has format: ... untuk nama "Name"?
+      const nameMatch = lastModelMessage.match(/untuk nama "([^"]+)"/i);
+      const name = nameMatch ? nameMatch[1].trim() : '';
+
+      if (name) {
+        const code = cleanAccessCode(query);
+        return await performKasbonCheckout(cartItems, name, code);
+      }
+    }
 
     const isAffirmation = ['ya', 'betul', 'benar', 'oke', 'ok', 'setuju', 'lanjut', 'yes', 'iya', 'sudah benar', 'siap'].some(
       aff => query === aff || query.startsWith(aff + ' ') || query.endsWith(' ' + aff) || query.includes(' ' + aff + ' ')
@@ -331,11 +457,17 @@ async function handleMockAI(
 
       const lastMsgLower = lastModelMessage.toLowerCase();
       const isKasbon = lastMsgLower.includes('kasbon') || lastMsgLower.includes('hutang') || hasKasbonKeywords;
-      const isQris = lastMsgLower.includes('qris') || lastMsgLower.includes('midtrans') || query.includes('qris') || query.includes('midtrans') || query.includes('sekarang') || query.includes('scan') || query.includes('transfer');
 
       if (isKasbon) {
         let name = '';
-        if (matchMockKasbon) {
+        let code = '';
+        const regexMockKasbonWithCode = /(?:kasbon|hutang|bayar nanti)\s+(?:atas nama|pake nama|untuk)?\s*([a-zA-Z\s]+?)\s+(?:dengan kode akses|kode akses|kode|pin)\s*([a-zA-Z0-9\s]+)/i;
+        const matchMockKasbonWithCode = query.match(regexMockKasbonWithCode);
+
+        if (matchMockKasbonWithCode) {
+          name = matchMockKasbonWithCode[1].trim();
+          code = cleanAccessCode(matchMockKasbonWithCode[2]);
+        } else if (matchMockKasbon) {
           name = matchMockKasbon[1].trim();
         } else {
           // If the last model message asked for a name or mentioned Kasbon, check if the query is just a name
@@ -346,7 +478,7 @@ async function handleMockAI(
         }
 
         if (name && name.toLowerCase() !== 'lunas' && name.toLowerCase() !== 'bayar' && name.toLowerCase() !== 'cek' && name.toLowerCase() !== 'daftar') {
-          return await performKasbonCheckout(cartItems, name);
+          return await performKasbonCheckout(cartItems, name, code);
         } else {
           return NextResponse.json({
             response: 'Oke, Kak! Siap, bisa banget kok kasbon dulu. Tapi, sebelumnya boleh tahu nama lengkap Kakak siapa ya, biar bisa dicatat di pembukuan kasbon kita?',
@@ -355,16 +487,9 @@ async function handleMockAI(
             isMock: true
           });
         }
-      } else if (isQris) {
-        return await performQrisCheckout(cartItems);
       } else {
-        // If confirmed but payment method not specified yet, ask for it
-        return NextResponse.json({
-          response: 'Baik, Kak! Pesanan sudah dikonfirmasi. Mau dibayar langsung menggunakan QRIS atau dicatat sebagai Kasbon dulu nih? 😊',
-          speakText: 'Mau dibayar menggunakan QRIS atau dicatat sebagai Kasbon dulu, Kak?',
-          action: null,
-          isMock: true
-        });
+        // Default to QRIS checkout (No pro-active option for Kasbon is offered)
+        return await performQrisCheckout(cartItems);
       }
     }
 
@@ -466,8 +591,8 @@ async function handleMockAI(
         }
       } else {
         return NextResponse.json({
-          response: `Baik Kak. Pesanan Kakak saat ini: ${cartListStr} dengan total Rp ${totalAmount.toLocaleString('id-ID')}. Apakah pesanan ini sudah benar? Jika sudah, mau dibayar langsung menggunakan QRIS atau dicatat sebagai Kasbon dulu nih? 😊`,
-          speakText: `Pesanan Kakak seharga ${totalAmount} rupiah. Apakah sudah benar? Dan mau dibayar menggunakan QRIS atau dicatat sebagai Kasbon dulu?`,
+          response: `Baik Kak. Pesanan Kakak saat ini: ${cartListStr} dengan total Rp ${totalAmount.toLocaleString('id-ID')}. Apakah pesanan ini sudah benar dan siap diproses pembayarannya via QRIS?`,
+          speakText: `Pesanan Kakak seharga ${totalAmount} rupiah. Apakah pesanan ini sudah benar dan siap diproses pembayarannya via QRIS?`,
           action: null,
           isMock: true
         });
@@ -986,12 +1111,11 @@ async function handleRealGeminiAI(
     
     ATURAN CHECKOUT / BAYAR:
     - PENTING: Ketika pelanggan menyatakan ingin membayar, checkout, atau selesai belanja (misal: "checkout dong", "saya mau bayar", "sudah selesai belanja"), Anda JANGAN langsung memanggil 'checkoutCart'. 
-    - Pertama-tama, sebutkan detail isi keranjang belanja mereka beserta total harganya dan tanyakan konfirmasi apakah pesanan mereka sudah benar (Contoh: "Keranjang Kakak berisi 1 Indomie Goreng dan 3 Aqua dengan total Rp 15.000. Apakah pesanan Kakak ini sudah benar?").
-    - Jika metode pembayaran belum ditentukan, tanyakan juga: "Jika sudah benar, mau dibayar langsung menggunakan QRIS atau dicatat sebagai Kasbon dulu nih, Kak? 😊" dalam pesan konfirmasi tersebut.
-    - Jika metode pembayaran sudah ditentukan (misal: QRIS atau Kasbon), tanyakan konfirmasi pesanan terlebih dahulu sebelum memanggil 'checkoutCart' (Contoh: "Pesanan Kakak berisi 1 Indomie dan 3 Aqua seharga Rp 15.000. Apakah sudah benar dan siap dibayar menggunakan QRIS?").
-    - Panggil 'checkoutCart' HANYA jika pelanggan telah mengonfirmasi bahwa pesanan sudah benar (misal: mereka berkata "Ya", "Benar", "Oke", "Lanjut", "Setuju").
-    - Jika pelanggan memilih QRIS/bayar langsung, panggil 'checkoutCart' dengan paymentType: 'MIDTRANS'.
-    - Jika pelanggan memilih Kasbon/hutang/bayar nanti, panggil 'checkoutCart' dengan paymentType: 'KASBON'. (Ingat: jika nama pembeli belum disebutkan, kirim buyerName sebagai string kosong agar sistem memproses penanyaan nama).
+    - Pertama-tama, sebutkan detail isi keranjang belanja mereka beserta total harganya dan tanyakan konfirmasi apakah pesanan mereka sudah benar dan siap diproses pembayarannya via QRIS (Contoh: "Keranjang Kakak berisi 1 Indomie Goreng dan 3 Aqua dengan total Rp 15.000. Apakah pesanan Kakak ini sudah benar dan siap diproses pembayarannya via QRIS?").
+    - PENTING: JANGAN PERNAH menyarankan atau menawarkan opsi Kasbon secara proaktif kepada pelanggan sebelum pembayaran. Arahkan mereka selalu ke pembayaran QRIS/Midtrans secara default.
+    - Namun, Anda HARUS tetap "membaca dan berpikir" apakah pelanggan secara eksplisit meminta Kasbon atau berutang (misal: "boleh kasbon dulu?", "saya mau kasbon atas nama Andi"). Jika pelanggan secara eksplisit meminta Kasbon, panggil 'checkoutCart' dengan paymentType: 'KASBON' (jika nama pembeli belum disebutkan, kirim buyerName sebagai string kosong agar sistem memproses penanyaan nama).
+    - PENTING: Jika pembayaran Kasbon berhasil, sebutkan konfirmasi sukses dan bacakan total kasbon akumulasi mereka saat ini secara ramah (Contoh: "Terima kasih Kak, kasbon sudah selesai dan berhasil dicatat. Total kasbon Anda saat ini adalah Rp X.XXX.").
+    - Jika pelanggan mengonfirmasi bahwa pesanan sudah benar (misal: "Ya", "Benar", "Oke", "Lanjut", "Setuju") tanpa menyebutkan kasbon, panggil 'checkoutCart' dengan paymentType: 'MIDTRANS'.
     - Selalu tampilkan detail harga produk yang ramah dalam Rupiah.
     
     ATURAN OWNER MODE:
@@ -1035,12 +1159,13 @@ async function handleRealGeminiAI(
     },
     {
       name: 'checkoutCart',
-      description: 'Melakukan pembayaran/checkout untuk seluruh isi keranjang belanja. Bisa menggunakan QRIS/Midtrans biasa, atau menggunakan metode Kasbon (bayar nanti/hutang pembeli). Panggil fungsi ini jika pelanggan ingin kasbon (bayar nanti/hutang), meskipun namanya belum disebutkan (kirim buyerName sebagai string kosong atau undefined).',
+      description: 'Melakukan pembayaran/checkout untuk seluruh isi keranjang belanja. Bisa menggunakan QRIS/Midtrans biasa, atau menggunakan metode Kasbon (bayar nanti/hutang pembeli). Panggil fungsi ini jika pelanggan ingin kasbon (bayar nanti/hutang), meskipun namanya atau kode aksesnya belum disebutkan (kirim buyerName dan accessCode sebagai string kosong atau undefined).',
       parameters: {
         type: SchemaType.OBJECT,
         properties: {
           paymentType: { type: SchemaType.STRING, enum: ['MIDTRANS', 'KASBON'], description: 'Tipe pembayaran (MIDTRANS untuk bayar sekarang via QRIS, KASBON untuk hutang pembeli/bayar nanti).' },
-          buyerName: { type: SchemaType.STRING, description: 'Nama lengkap pembeli yang melakukan kasbon. Jika pembeli belum menyebutkan namanya, kirim string kosong "" agar sistem memicu alur penanyaan nama.' }
+          buyerName: { type: SchemaType.STRING, description: 'Nama lengkap pembeli yang melakukan kasbon. Jika pembeli belum menyebutkan namanya, kirim string kosong "" agar sistem memicu alur penanyaan nama.' },
+          accessCode: { type: SchemaType.STRING, description: 'Kode akses Kasbon (PIN/passcode). Jika belum diinputkan oleh pelanggan, kirim string kosong "" agar sistem memicu alur penanyaan kode akses.' }
         }
       }
     }
@@ -1321,10 +1446,14 @@ async function handleRealGeminiAI(
       } else {
         const paymentType = args.paymentType || 'MIDTRANS';
         const buyerName = args.buyerName || '';
+        const accessCode = args.accessCode || '';
 
         if (paymentType === 'KASBON' && (!buyerName || buyerName.trim() === '')) {
           toolResult = { success: false, error: 'Nama pembeli wajib diisi untuk melakukan Kasbon.' };
           clientAction = { type: 'ASK_KASBON_NAME', payload: null };
+        } else if (paymentType === 'KASBON' && (!accessCode || accessCode.trim() === '')) {
+          toolResult = { success: false, error: 'Kode akses Kasbon wajib diisi.' };
+          clientAction = { type: 'ASK_KASBON_ACCESS_CODE', payload: { name: buyerName.trim() } };
         } else {
           try {
             const dbItems: any[] = [];
@@ -1349,6 +1478,42 @@ async function handleRealGeminiAI(
             if (paymentType === 'KASBON') {
               // Direct creation of KASBON transaction and deduction of stock
               const result = await prisma.$transaction(async (tx) => {
+                const cleanName = buyerName.trim();
+                let debtor = null;
+
+                // 1. Check if input is a code (KSB-XXXXXX)
+                if (/^KSB-[A-Z0-9]{6}$/i.test(cleanName)) {
+                  debtor = await tx.debtor.findUnique({
+                    where: { code: cleanName.toUpperCase() }
+                  });
+                }
+
+                // 2. Search by name (case-insensitive) if not found by code
+                if (!debtor) {
+                  debtor = await tx.debtor.findFirst({
+                    where: { name: { equals: cleanName, mode: 'insensitive' } }
+                  });
+                }
+
+                // 3. Create new Debtor if not found (generate random 5-character PIN if not specified)
+                if (!debtor) {
+                  const code = await getUniqueDebtorCode(tx);
+                  debtor = await tx.debtor.create({
+                    data: {
+                      name: cleanName,
+                      code: code,
+                      accessCode: accessCode ? accessCode.trim() : generateAccessCode()
+                    }
+                  });
+                } else {
+                  // Verify access code for existing debtor (case-insensitive and whitespace-stripped)
+                  const cleanAccessInput = accessCode ? accessCode.trim().replace(/\s/g, '').toLowerCase() : '';
+                  const cleanDebtorCode = debtor.accessCode ? debtor.accessCode.trim().replace(/\s/g, '').toLowerCase() : '';
+                  if (cleanDebtorCode && cleanDebtorCode !== cleanAccessInput) {
+                    throw new Error('KASBON_ACCESS_CODE_INVALID');
+                  }
+                }
+
                 const txn = await tx.transaction.create({
                   data: {
                     invoiceNumber,
@@ -1364,9 +1529,10 @@ async function handleRealGeminiAI(
                     },
                     kasbon: {
                       create: {
-                        buyerName: buyerName.trim(),
+                        buyerName: debtor.name,
                         amount: totalAmount,
-                        status: 'UNPAID'
+                        status: 'UNPAID',
+                        debtorId: debtor.id
                       }
                     }
                   }
@@ -1378,6 +1544,15 @@ async function handleRealGeminiAI(
                     data: { stock: { decrement: item.quantity } }
                   });
 
+                  await tx.stockLog.create({
+                    data: {
+                      productId: item.product.id,
+                      type: 'STOCK_OUT',
+                      quantity: item.quantity,
+                      reason: `Kasbon ${invoiceNumber} oleh ${debtor.name} (${debtor.code})`
+                    }
+                  });
+
                   if (updated.stock <= updated.minStock) {
                     await tx.notification.create({
                       data: {
@@ -1387,16 +1562,35 @@ async function handleRealGeminiAI(
                     });
                   }
                 }
-                return txn;
+                // Calculate total unpaid accumulated kasbon (including this transaction)
+                const unpaidKasbons = await tx.kasbon.findMany({
+                  where: {
+                    debtorId: debtor.id,
+                    status: 'UNPAID'
+                  }
+                });
+                const totalAccumulated = unpaidKasbons.reduce((sum, k) => sum + k.amount, 0);
+
+                return { txn, debtor, totalAccumulated };
               });
 
-              toolResult = { success: true, invoiceNumber, totalAmount, paymentType: 'KASBON', buyerName: buyerName.trim() };
+              toolResult = { 
+                success: true, 
+                invoiceNumber, 
+                totalAmount, 
+                paymentType: 'KASBON', 
+                buyerName: result.debtor.name, 
+                debtorCode: result.debtor.code,
+                totalAccumulated: result.totalAccumulated
+              };
               clientAction = {
                 type: 'KASBON_CHECKOUT_SUCCESS',
                 payload: {
                   invoiceNumber,
                   totalAmount,
-                  buyerName: buyerName.trim()
+                  buyerName: result.debtor.name,
+                  debtorCode: result.debtor.code,
+                  totalAccumulated: result.totalAccumulated
                 }
               };
             } else {
@@ -1438,6 +1632,7 @@ async function handleRealGeminiAI(
                     secure: true
                   }
                 };
+
                 const response = await fetch(midtransUrl, {
                   method: 'POST',
                   headers: {
@@ -1476,7 +1671,12 @@ async function handleRealGeminiAI(
               };
             }
           } catch (err: any) {
-            toolResult = { success: false, error: err.message };
+            if (err.message === 'KASBON_ACCESS_CODE_INVALID') {
+              toolResult = { success: false, error: 'Kode akses Kasbon salah. Silakan coba lagi.' };
+              clientAction = { type: 'ASK_KASBON_ACCESS_CODE', payload: { name: buyerName.trim() } };
+            } else {
+              toolResult = { success: false, error: err.message };
+            }
           }
         }
       }
